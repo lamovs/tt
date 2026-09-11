@@ -1,0 +1,6 @@
+[ui]
+tab_bar_position = "top"
+hide_tab_bar_when_single_tab = false
+tab_bar_right = [
+  { type = "command", command = "tt timer indicator --format plain --width 48", interval_seconds = 1, timeout_seconds = 1 },
+]

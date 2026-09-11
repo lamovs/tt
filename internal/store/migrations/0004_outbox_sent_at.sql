@@ -1,0 +1,37 @@
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ALTER TABLE outbox ADD COLUMN sent_at INTEGER;
+
+
+
+
+CREATE INDEX idx_outbox_task_seq ON outbox(task_id, seq);

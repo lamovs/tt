@@ -1,0 +1,8 @@
+#!/bin/sh
+set -eu
+
+if [ "${1-}" = "--" ]; then
+    shift
+fi
+
+exec /usr/bin/open -n "$HOME/.local/share/tt/TT Notifier.app" --args "$@"

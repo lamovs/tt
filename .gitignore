@@ -1,0 +1,6 @@
+/tt
+/docs/
+/dist/
+*.db
+*.db-wal
+*.db-shm

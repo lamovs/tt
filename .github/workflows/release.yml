@@ -1,0 +1,93 @@
+name: Release
+
+on:
+  push:
+    tags: ['v[0-9]*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: go.mod
+      - run: go test -race ./...
+      - run: go vet ./...
+
+  release:
+    needs: test
+    runs-on: macos-15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: go.mod
+      - run: sh scripts/build-macos-notifier dist/notifier
+      - uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94
+        with:
+          version: '2.18.1'
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - run: go run ./tools/homebrew --version "$RELEASE_TAG" --checksums dist/release/checksums.txt --output dist/release/tt.rb
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+      - run: ruby -c dist/release/tt.rb
+      - run: gh release upload "$RELEASE_TAG" dist/release/tt.rb
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.ref_name }}
+      - run: gh release edit "$RELEASE_TAG" --draft=false
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.ref_name }}
+      - name: Update Homebrew tap
+        env:
+          HOMEBREW_TAP_DEPLOY_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          if [ -z "$HOMEBREW_TAP_DEPLOY_KEY" ]; then
+            echo 'Homebrew tap unchanged: HOMEBREW_TAP_DEPLOY_KEY is not configured.'
+            exit 1
+          fi
+          key_dir=$(mktemp -d "$RUNNER_TEMP/tt-tap-key.XXXXXX")
+          trap 'rm -r "$key_dir"' EXIT
+          printf '%s\n' "$HOMEBREW_TAP_DEPLOY_KEY" > "$key_dir/id_ed25519"
+          unset HOMEBREW_TAP_DEPLOY_KEY
+          chmod 600 "$key_dir/id_ed25519"
+          printf '%s\n' 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl' > "$key_dir/known_hosts"
+          export GIT_SSH_COMMAND="ssh -F /dev/null -i '$key_dir/id_ed25519' -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile='$key_dir/known_hosts'"
+          git clone git@github.com:lamovs/homebrew-tap.git "$RUNNER_TEMP/homebrew-tap"
+          mkdir -p "$RUNNER_TEMP/homebrew-tap/Formula"
+          if [ -f "$RUNNER_TEMP/homebrew-tap/Formula/tt.rb" ]; then
+            ruby -rrubygems -e '
+              previous = File.read(ARGV[0]).match(/^  version "([0-9]+\.[0-9]+\.[0-9]+)"$/)
+              abort "Cannot read the current tap version" unless previous
+              requested = Gem::Version.new(ARGV[1].delete_prefix("v"))
+              abort "Refusing to downgrade the tap" if requested < Gem::Version.new(previous[1])
+            ' "$RUNNER_TEMP/homebrew-tap/Formula/tt.rb" "$RELEASE_TAG"
+          fi
+          cp dist/release/tt.rb "$RUNNER_TEMP/homebrew-tap/Formula/tt.rb"
+          cd "$RUNNER_TEMP/homebrew-tap"
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add Formula/tt.rb
+          if ! git diff --cached --quiet; then
+            git commit -m "Update tt to $RELEASE_TAG"
+            git push origin HEAD
+          fi

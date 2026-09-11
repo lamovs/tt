@@ -1,0 +1,72 @@
+version: 2
+project_name: tt
+dist: dist/release
+
+builds:
+  - id: tt
+    main: ./cmd/tt
+    binary: tt
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+      - -buildvcs=false
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+
+archives:
+  - id: tt
+    ids: [tt]
+    formats: [tar.gz]
+    name_template: 'tt_{{.Version}}_{{.Os}}_{{.Arch}}'
+    builds_info:
+      owner: root
+      group: root
+      mtime: '{{.CommitDate}}'
+    files:
+      - src: integrations/herdr/tt.toml
+        dst: share/tt/integrations/herdr
+        strip_parent: true
+        info: {owner: root, group: root, mode: 0644}
+      - src: integrations/tmux/tt.conf
+        dst: share/tt/integrations/tmux
+        strip_parent: true
+        info: {owner: root, group: root, mode: 0644}
+      - src: '{{ if eq .Os "darwin" }}integrations/macos/tt-notify{{ else }}no-macos-helper*{{ end }}'
+        dst: share/tt/integrations/macos
+        strip_parent: true
+        info: {owner: root, group: root, mode: 0755}
+      - src: '{{ if eq .Os "darwin" }}dist/notifier/TT Notifier.app/Contents/Info.plist{{ else }}no-macos-app*{{ end }}'
+        dst: share/tt/TT Notifier.app/Contents
+        strip_parent: true
+        info: {owner: root, group: root, mode: 0644}
+      - src: '{{ if eq .Os "darwin" }}dist/notifier/TT Notifier.app/Contents/MacOS/TTNotifier{{ else }}no-macos-app*{{ end }}'
+        dst: share/tt/TT Notifier.app/Contents/MacOS
+        strip_parent: true
+        info: {owner: root, group: root, mode: 0755}
+      - src: '{{ if eq .Os "darwin" }}dist/notifier/TT Notifier.app/Contents/Resources/tt.icns{{ else }}no-macos-app*{{ end }}'
+        dst: share/tt/TT Notifier.app/Contents/Resources
+        strip_parent: true
+        info: {owner: root, group: root, mode: 0644}
+      - src: '{{ if eq .Os "darwin" }}dist/notifier/TT Notifier.app/Contents/_CodeSignature/CodeResources{{ else }}no-macos-app*{{ end }}'
+        dst: share/tt/TT Notifier.app/Contents/_CodeSignature
+        strip_parent: true
+        info: {owner: root, group: root, mode: 0644}
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  disable: true
+
+release:
+  github:
+    owner: lamovs
+    name: tt
+  draft: true
