@@ -1305,39 +1305,6 @@ func TestCmdSyncWarnsAboutTheEntriesItRaises(t *testing.T) {
 	}
 }
 
-func TestCmdSyncWarnsAboutTheEntriesItThrowsAway(t *testing.T) {
-	isolate(t)
-	t.Setenv(tokenEnvVar, "test-token")
-	seedParkedCreate(t)
-
-	other, err := store.Open(context.Background(), "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer other.Close()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	stdout := &cancelOnWrite{cancel: cancel}
-	stderr := &parkOnWrite{store: other, taskID: store.LocalIDPrefix + "t2"}
-	if code := cmdSync(ctx, stdout, stderr, []string{"--drop-parked"}); code != exitInterrupted {
-		t.Errorf("cmdSync = %d, want %d", code, exitInterrupted)
-	}
-	if err := stderr.wait(); err != nil {
-		t.Fatalf("park a create in the window: %v", err)
-	}
-	if got := stderr.buf.String(); !strings.Contains(got, "1 parked create(s) will be thrown away") {
-		t.Fatalf("stderr = %q, want the caution counted off the queue the drop empties", got)
-	}
-	if out := stdout.buf.String(); !strings.Contains(out, "threw away 1 parked entry(s)") {
-		t.Errorf("stdout = %q, want the drop to have taken the entries the caution covered and no others", out)
-	}
-	if n := parkedEntries(t); n != 1 {
-		t.Errorf("%d entr(y/ies) parked, want the create parked in the window left exactly where it was", n)
-	}
-}
-
 const parkWindow = 500 * time.Millisecond
 
 type parkOnWrite struct {

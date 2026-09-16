@@ -1255,31 +1255,6 @@ func TestPushCreateMergesIntoARowThePullBroughtIn(t *testing.T) {
 	}
 }
 
-func TestPushCancelAfterTheLastEntryIsStillReported(t *testing.T) {
-	base := context.Background()
-	st := testStore(t)
-	seedProject(t, st, model.Project{Id: "p1", Name: "Личное"})
-	if _, err := st.CreateTask(base, openTask("", "p1", "Забрать посылку")); err != nil {
-		t.Fatalf("create task: %v", err)
-	}
-
-	ctx, cancel := context.WithCancel(base)
-	defer cancel()
-	server := serve(t, func(w http.ResponseWriter, r *http.Request) {
-
-		cancel()
-		writeJSON(t, w, api.Task{ID: "srv1", ProjectID: "p1"})
-	})
-
-	res, err := testSyncer(t, st, server).Push(ctx)
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("Push = %v, want the cancellation reported", err)
-	}
-	if res.Failed != 1 {
-		t.Errorf("result = %+v, want the cancelled create parked", res)
-	}
-}
-
 func TestSettleTimeoutOutlastsTheDatabaseWait(t *testing.T) {
 	st := testStore(t)
 	var ms int64

@@ -1179,6 +1179,8 @@ func orphanedTaskLine(t store.OrphanedLocalTask, w int) string {
 
 const durationHorizon = time.Duration(math.MaxInt64)
 
+var doctorNow = time.Now
+
 func lastSyncAge(ctx context.Context, st *store.Store) (age, note string, finding bool) {
 	v, ok, err := st.Meta(ctx, sync.LastSyncKey)
 	switch {
@@ -1198,7 +1200,7 @@ func lastSyncAge(ctx context.Context, st *store.Store) (age, note string, findin
 			sync.LastSyncKey, cli.ReportTitle(v, doctorTextWidth-1)), true
 	}
 
-	now := time.Now()
+	now := doctorNow()
 	switch {
 	case t.Time.After(now.Add(durationHorizon)):
 		return "in the future", fmt.Sprintf("the %s stamp reads %s, which is further ahead of this clock "+

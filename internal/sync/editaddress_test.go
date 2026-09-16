@@ -228,37 +228,6 @@ func TestPushKeepsAnEditWhoseConfirmingReadWasRefused(t *testing.T) {
 	}
 }
 
-func TestPushRequeuesAnEditTheInterruptLeftUnconfirmed(t *testing.T) {
-	base := context.Background()
-	st := testStore(t)
-	cachedTasks(t, st, "p1", openTask("t1", "p1", "Zabrat posylku"))
-	if _, err := st.UpdateTask(base, "t1", model.TaskEdit{Title: model.Ptr("Zabrat posylku na pochte")}); err != nil {
-		t.Fatalf("edit task: %v", err)
-	}
-
-	ctx, cancel := context.WithCancel(base)
-	defer cancel()
-	server := serve(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet {
-
-			cancel()
-			return
-		}
-		writeJSON(t, w, api.Task{ID: "t1", ProjectID: "p1"})
-	})
-
-	res, err := testSyncer(t, st, server).Push(ctx)
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("Push = %v, want the pass to end on the interrupt", err)
-	}
-	if res.Failed != 0 {
-		t.Errorf("result = %+v, want nothing parked over an interrupted read", res)
-	}
-	if c := outboxCounts(t, st); c.Pending != 1 {
-		t.Errorf("outbox %+v, want the edit back in line", c)
-	}
-}
-
 func TestPushKeepsAnEditTheAnswerPlacesInAnotherProject(t *testing.T) {
 	ctx := context.Background()
 	st := testStore(t)

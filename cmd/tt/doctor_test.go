@@ -2018,6 +2018,11 @@ func TestCheckNotifyBoundsAProgramNameOutOfTheConfig(t *testing.T) {
 }
 
 func TestCheckCacheTellsNeverFromAnUnreadableStamp(t *testing.T) {
+	now := time.Now()
+	saved := doctorNow
+	doctorNow = func() time.Time { return now }
+	t.Cleanup(func() { doctorNow = saved })
+
 	stamp := func(s string) *string { return &s }
 	cases := map[string]struct {
 		stamp  *string
@@ -2027,15 +2032,15 @@ func TestCheckCacheTellsNeverFromAnUnreadableStamp(t *testing.T) {
 		say string
 	}{
 		"a cache that has never synced": {nil, "synced never", statusOK, ""},
-		"a stamp tt wrote": {stamp(model.NewTime(time.Now().Add(-2 * time.Hour)).StoreString()),
+		"a stamp tt wrote": {stamp(model.NewTime(now.Add(-2 * time.Hour)).StoreString()),
 			" ago", statusOK, ""},
-		"a sync a moment ago": {stamp(model.NewTime(time.Now()).StoreString()),
+		"a sync a moment ago": {stamp(model.NewTime(now).StoreString()),
 			"synced just now", statusOK, ""},
-		"a shade ahead of the clock": {stamp(model.NewTime(time.Now().Add(500 * time.Millisecond)).StoreString()),
+		"a shade ahead of the clock": {stamp(model.NewTime(now.Add(500 * time.Millisecond)).StoreString()),
 			"synced just now", statusOK, ""},
-		"an hour ahead of the clock": {stamp(model.NewTime(time.Now().Add(time.Hour)).StoreString()),
+		"an hour ahead of the clock": {stamp(model.NewTime(now.Add(time.Hour)).StoreString()),
 			"synced in the future", statusWarn, "ahead of this clock, so a scheduled sync is not due"},
-		"two hundred years ahead": {stamp(model.NewTime(time.Now().AddDate(200, 0, 0)).StoreString()),
+		"two hundred years ahead": {stamp(model.NewTime(now.AddDate(200, 0, 0)).StoreString()),
 			"synced in the future", statusWarn, "ahead of this clock, so a scheduled sync is not due"},
 		"further ahead than a duration reaches": {stamp("9999-12-31T23:59:59.000Z"),
 			"synced in the future", statusWarn, "further ahead of this clock than tt measures an age over"},
@@ -2054,15 +2059,7 @@ func TestCheckCacheTellsNeverFromAnUnreadableStamp(t *testing.T) {
 				if c.stamp == nil {
 					return
 				}
-				value := *c.stamp
-
-				switch name {
-				case "a sync a moment ago":
-					value = model.NewTime(time.Now()).StoreString()
-				case "a shade ahead of the clock":
-					value = model.NewTime(time.Now().Add(500 * time.Millisecond)).StoreString()
-				}
-				if err := st.SetMeta(ctx, sync.LastSyncKey, value); err != nil {
+				if err := st.SetMeta(ctx, sync.LastSyncKey, *c.stamp); err != nil {
 					t.Fatal(err)
 				}
 			})
