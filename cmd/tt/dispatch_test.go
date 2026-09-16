@@ -406,6 +406,8 @@ func boundWordCases() []boundWordCase {
 		{"an option ui does not take", []string{"ui", "--" + long}, exitUsage, false, "ui.go", "unknown option "},
 		{"an option s does not take", []string{"s", "milk", "--" + long}, exitUsage, false, "s.go", "unknown option "},
 		{"an option undo does not take", []string{"undo", "--" + long}, exitUsage, false, "undo.go", "unknown option "},
+		{"an option ai does not take", []string{"ai", "milk", "--" + long}, exitUsage, false, "ai.go", "unknown option "},
+		{"a profile ai has no config for", []string{"ai", "milk", "--profile", long}, exitUsage, false, "ai.go", "no AI profile called "},
 		{"an argument today does not take", []string{"today", long}, exitUsage, false, "today.go", "unexpected argument "},
 		{"an option today does not take", []string{"today", "--" + long}, exitUsage, false, "today.go", "unknown option "},
 		{"an argument config does not take", []string{"config", long}, exitUsage, false, "config_cmd.go", "tt: config: unexpected argument "},
@@ -433,7 +435,7 @@ type heldElsewhereSite struct {
 	holder string
 }
 
-// Forty-one sites below account for fifty-two bounding calls and their focused tests.
+// Forty-five sites below account for fifty-eight bounding calls and their focused tests.
 var heldElsewhere = []heldElsewhereSite{
 	{"auth.go", "authText", 1,
 		"Local authorization labels and scopes are escaped and bounded as complete final lines",
@@ -672,6 +674,22 @@ var heldElsewhere = []heldElsewhereSite{
 	{"undo.go", "undoSkipEntry", 1,
 		"the same op, in the line --skip prints about the record it dropped",
 		"TestUndoOfAForeignOpStaysInsideTheWidth"},
+	{"undo.go", "undoGroup", 1,
+		"the op out of a record of an undo group this build has no reversal for, in the refusal that names it",
+		"TestUndoOfAGroupWithAForeignOpStaysInsideTheWidth"},
+	{"undo.go", "undoSkipGroup", 1,
+		"the same op, in the line --skip prints about each record of the group it dropped",
+		"TestUndoOfAGroupWithAForeignOpStaysInsideTheWidth"},
+	{"doctor_ai.go", "checkAI", 3,
+		"the AI profile names doctor reports - the default profile in the summary, and in each warning " +
+			"note the profile and the binary it runs - all taken from the user's config and each cut to " +
+			"what its fixed words leave of the line; doctor wraps the result",
+		"TestDoctorAICheckBoundsProfileNames"},
+	{"doctor_ai.go", "checkCodexInstructions", 1,
+		"the names of the profiles that run codex, in the warning that codex sends its global instructions file: " +
+			"each taken from the user's config and cut to the width the AI check gives a profile name; " +
+			"doctor wraps the list",
+		"TestDoctorWarnsThatCodexSendsTheGlobalAgentsFile"},
 	{"undo.go", "undoName", 1,
 		"the title of the task a refusal or a dropped record names, at the whole width because nothing " +
 			"tt writes in these sentences stands hard against the name",
@@ -809,8 +827,8 @@ func TestEveryQuotedWordIsAccountedFor(t *testing.T) {
 		}
 	}
 
-	const heldRows = 41
-	const heldCalls = 52
+	const heldRows = 45
+	const heldCalls = 58
 	if len(heldElsewhere) != heldRows {
 		t.Errorf("heldElsewhere has %d rows and the account over it is written for %d; the sentences "+
 			"there spell the number out in words and have to be read again", len(heldElsewhere), heldRows)

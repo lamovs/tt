@@ -26,6 +26,8 @@ func init() {
 				{Title: "How undo works", Items: []string{
 					"The reversal is queued like any other change and is sent by the next tt sync.",
 					"A reversed entry is removed from undo history, so running tt undo again reaches the preceding change.",
+					"Changes made together, such as everything one tt ai request applied, are reversed together by one tt undo, and --skip drops them together.",
+					"A native move is reversed as well: an unsent move is cancelled, and a move sync already confirmed is moved back by a new queued move.",
 				}},
 				{Title: "Non-reversible records", Items: []string{
 					"Legacy recreate/delete moves cannot be reversed because the original task ID no longer exists. tt refuses instead of guessing.",
@@ -107,6 +109,14 @@ var undoReversals = map[string]undoReversal{
 		},
 	},
 
+	store.OpTaskMoveNative: {
+		what:       "the move of",
+		reversible: true,
+		say: func(a store.UndoAction, t model.Task, p cli.Palette) []string {
+			return []string{cli.ReportLine("undid the move of ", undoTitle(t), ": it is back in its old list", p.Bold)}
+		},
+	},
+
 	store.OpTaskMoveRecreate: {
 		what: "the move of",
 
@@ -164,6 +174,9 @@ func cmdUndo(inv *invocation) int {
 	case err != nil:
 		return inv.fail(err)
 	}
+	if e.Group != "" {
+		return undoGroup(inv, st, e, skip)
+	}
 	rev, known := undoReversals[e.Action.Op]
 
 	if skip {
@@ -184,6 +197,9 @@ func cmdUndo(inv *invocation) int {
 	}
 
 	t, err := st.ApplyUndo(inv.ctx, e)
+	if why, ok := undoMoveRefusal(inv, st, e, err); ok {
+		return undoRefuse(inv, why)
+	}
 	switch {
 	case errors.Is(err, store.ErrEntityUndoUnavailable), errors.Is(err, store.ErrEntityUncertain):
 		return undoRefuse(inv, "the resource change cannot be proven unsent and independent; inspect queue recovery before another action")
@@ -209,6 +225,24 @@ func cmdUndo(inv *invocation) int {
 		inv.resultData = map[string]any{"changed": true, "operation": e.Action.Op, "resource_ref": e.Action.EntityRef, "operation_seq": e.Action.OperationSeq, "cancelled_unsent": true}
 	}
 	return exitOK
+}
+
+// undoMoveRefusal explains why a native move could not be reversed: the move
+// may be on its way to the server, or the task has left the list the move put
+// it in since.
+func undoMoveRefusal(inv *invocation, st *store.Store, e store.UndoEntry, err error) (string, bool) {
+	if e.Action.Op != store.OpTaskMoveNative || err == nil {
+		return "", false
+	}
+	name := undoSubject(inv.ctx, st, e.Action, cli.PlainPalette())
+	switch {
+	case errors.Is(err, store.ErrEntityUncertain):
+		return "the move of " + name + " may already have reached the server, so it cannot be cancelled " +
+			"from here - run tt sync, then tt undo again to move it back", true
+	case errors.Is(err, store.ErrTaskChanged):
+		return "the move of " + name + " cannot be reversed: the task is no longer in the list the move put it in", true
+	}
+	return "", false
 }
 
 func unsafeUndoReason(err error) string {
@@ -250,6 +284,123 @@ func undoRefuse(inv *invocation, why string) int {
 	cli.WriteLines(inv.stderr, cli.Wrap(why, cli.Width))
 	cli.WriteLines(inv.stderr, cli.Wrap(undoStuck, cli.Width))
 	return code
+}
+
+const undoGroupStuck = `nothing was reversed, and every record of the group stays on the undo stack ` +
+	`so that no part of it is reversed without the rest - run "tt undo --skip" to drop the ` +
+	`whole group and reach the change before it`
+
+func undoRefuseGroup(inv *invocation, count int, why string) int {
+	if count == 1 {
+		return undoRefuse(inv, why)
+	}
+	code := inv.fail(errors.New("the last change cannot be undone"))
+	cli.WriteLines(inv.stderr, cli.Wrap(fmt.Sprintf("the last change is %d changes made together, "+
+		"reversed together or not at all, and one of them stops the rest: %s", count, why), cli.Width))
+	cli.WriteLines(inv.stderr, cli.Wrap(undoGroupStuck, cli.Width))
+	return code
+}
+
+func undoGroup(inv *invocation, st *store.Store, top store.UndoEntry, skip bool) int {
+	group, err := st.LastUndoGroup(inv.ctx)
+	if err != nil {
+		return inv.fail(err)
+	}
+	if group[0].Seq != top.Seq {
+		return inv.fail(store.ErrUndoConflict)
+	}
+	if skip {
+		return undoSkipGroup(inv, st, group)
+	}
+	for _, e := range group {
+		rev, known := undoReversals[e.Action.Op]
+		switch {
+		case !known:
+			return undoRefuseGroup(inv, len(group), fmt.Sprintf("it was recorded as %s, an op this build has no reversal "+
+				"for - the cache may have been written by another one",
+				cli.ReportTitle(e.Action.Op, cli.Width-1)))
+		case rev.refuse != nil:
+			return undoRefuseGroup(inv, len(group), rev.refuse(undoSubject(inv.ctx, st, e.Action, cli.PlainPalette())))
+		}
+	}
+
+	if inv.interrupted() {
+		return exitInterrupted
+	}
+
+	tasks, err := st.ApplyUndoGroup(inv.ctx, group)
+	var failed *store.UndoGroupError
+	if errors.As(err, &failed) {
+		e, rev := failed.Entry, undoReversals[failed.Entry.Action.Op]
+		if why, ok := undoMoveRefusal(inv, st, e, failed.Err); ok {
+			return undoRefuseGroup(inv, len(group), why)
+		}
+		switch cause := failed.Err; {
+		case errors.Is(cause, store.ErrEntityUndoUnavailable), errors.Is(cause, store.ErrEntityUncertain):
+			return undoRefuseGroup(inv, len(group), "the resource change cannot be proven unsent and independent; inspect queue recovery before another action")
+		case errors.Is(cause, errUndoIncomplete):
+			return undoRefuseGroup(inv, len(group), fmt.Sprintf("the record of %s %s does not carry what reversing it needs",
+				rev.what, undoSubject(inv.ctx, st, e.Action, cli.PlainPalette())))
+		case errors.Is(cause, store.ErrNotFound):
+			return undoRefuseGroup(inv, len(group), fmt.Sprintf("%s %s cannot be reversed: the task is not in the cache "+
+				"any more, so there is nothing left to reverse it on",
+				rev.what, undoSubject(inv.ctx, st, e.Action, cli.PlainPalette())))
+		case errors.Is(cause, store.ErrUnsafeChecklist):
+			return undoRefuseGroup(inv, len(group), fmt.Sprintf("%s: checklist cannot be replaced losslessly; %s %s cannot be reversed safely",
+				unsafeUndoReason(cause), rev.what, undoSubject(inv.ctx, st, e.Action, cli.PlainPalette())))
+		}
+	}
+	if err != nil {
+		return inv.fail(err)
+	}
+
+	// A group of one change reads like any single undo.
+	var lines []string
+	if len(group) > 1 {
+		lines = append(lines, fmt.Sprintf("undid %d changes made together, newest first:", len(group)))
+	}
+	operations := make([]map[string]any, len(group))
+	for i, e := range group {
+		rev := undoReversals[e.Action.Op]
+		lines = append(lines, rev.say(e.Action, tasks[i], inv.outPalette())...)
+		operations[i] = map[string]any{"operation": e.Action.Op, "task": tasks[i]}
+		if e.Action.EntityRef != nil {
+			operations[i] = map[string]any{"operation": e.Action.Op, "resource_ref": e.Action.EntityRef, "operation_seq": e.Action.OperationSeq, "cancelled_unsent": true}
+		}
+	}
+	cli.WriteLines(inv.stdout, lines)
+	inv.resultData = map[string]any{"changed": true, "operation": "group", "group_id": group[0].Group, "count": len(group), "operations": operations}
+	return exitOK
+}
+
+func undoSkipGroup(inv *invocation, st *store.Store, group []store.UndoEntry) int {
+	var lines []string
+	after := `nothing was reversed; "tt undo" now reaches the change before it`
+	if len(group) > 1 {
+		lines = append(lines, fmt.Sprintf("dropped the records of %d changes made together, newest first:", len(group)))
+		after = `nothing was reversed; "tt undo" now reaches the change before them`
+	}
+	operations := make([]map[string]any, len(group))
+	for i, e := range group {
+		rev, known := undoReversals[e.Action.Op]
+		name := undoSubject(inv.ctx, st, e.Action, cli.PlainPalette())
+		what := rev.what + " " + name
+		if !known {
+			what = "the change recorded as " + cli.ReportTitle(e.Action.Op, cli.Width) + " to " + name
+		}
+		lines = append(lines, cli.Wrap("dropped the record of "+what, cli.Width)...)
+		operations[i] = map[string]any{"dropped_record": e.Seq, "operation": e.Action.Op}
+	}
+	if inv.interrupted() {
+		return exitInterrupted
+	}
+	if err := st.DropUndoGroup(inv.ctx, group); err != nil {
+		return inv.fail(err)
+	}
+	inv.resultData = map[string]any{"changed": true, "reversed": false, "operation": "group", "group_id": group[0].Group, "count": len(group), "operations": operations}
+
+	cli.WriteLines(inv.stdout, append(lines, after))
+	return exitOK
 }
 
 func undoDropTop(ctx context.Context, st *store.Store, is func(store.UndoEntry) bool) error {

@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"unicode/utf8"
 
@@ -650,7 +651,7 @@ func checkOnEndEdit(after config.Config, before *config.Config, hint string) err
 	}
 	want := *before
 	want.Timer.OnEnd = hint
-	if after != want {
+	if !reflect.DeepEqual(after, want) {
 		return errors.New("the edit changed a setting other than timer.on_end")
 	}
 	return nil

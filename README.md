@@ -129,7 +129,7 @@ Commands by area:
 
 - browse: `ui`, `today`, `ls`, `s`, `show`
 - change tasks: `add`, `edit`, `item`, `done`, `pri`, `due`, `schedule`,
-  `repeat`, `remind`, `mv`, `rm`, `undo`
+  `repeat`, `remind`, `mv`, `rm`, `undo`, `ai`
 - focus: `timer`, `pomodoro`
 - setup and maintenance: `setup`, `login`, `sync`, `auto`, `doctor`, `config`, `notify`
 - documentation: `help`, `version`
@@ -546,6 +546,149 @@ computable timestamps and local delivery eligibility. Missing reference policy,
 calendar month/day behavior, all-day conventions and ambiguous civil times are
 reported explicitly. The accepted local delivery allowlist is unchanged; an
 interpreted timestamp does not establish provider semantics or device receipt.
+
+## AI
+
+`tt ai` turns a request written in your own words, in any language, into tt
+operations. tt runs an agent CLI you already have installed and signed in to
+(`claude`, `codex`, or a command of your own) headlessly; you never open it.
+The model only proposes operations: `add`, `edit`, `schedule`, `done`, `move`
+and `checklist_add`. There is no delete, and unknown lists and tags are refused
+rather than created. tt checks every operation against the cache, shows one
+preview, and applies the accepted changes together, so one `tt undo` reverses
+all of them.
+
+```sh
+tt ai "buy milk tomorrow at 10"
+tt ai "move the report to Work and finish the call" --preview
+tt ai --accept PREVIEW_ID
+tt ai "standup tmr 9:30 for 15min, remind 5min before" -y
+tt ai find "what to buy at the store"
+```
+
+The model writes dates in tt's own date words (`tmr 10:00`, `fri`, `+3d`,
+`fri 14:00 + 2h`) and tt resolves them, so the preview shows exact times. In a
+terminal tt asks before applying. `--preview` only saves a preview, `-y`
+applies without asking (overlapping planned intervals also need
+`--allow-overlap`), and `--accept ID` applies a saved preview once, within 24
+hours, refusing if a task it changes has changed since. If one change fails
+while applying, the changes before it are reversed at once.
+
+`tt ai find` asks the model for keywords (including word forms and synonyms), a
+list, a status and date bounds, then searches the cache with them. `--rerank`
+has a second call rank the matches by their titles. With `context = "today"`
+or `"all"` that call is also made on its own for more than 15 matches; under
+`"minimal"` no title is sent without `--rerank`. `--no-ai-rerank` skips it. The
+results become the numbered listing, so `tt done 1` acts on the first one.
+
+Configuration:
+
+```toml
+[ai]
+default = "fast"
+fallback = ["deep"]
+context = "minimal"   # minimal, today or all
+timeout = "90s"
+
+[ai.profiles.fast]
+engine = "claude"     # claude -p --model sonnet --json-schema ... --output-format json
+model = "sonnet"
+effort = "high"
+
+[ai.profiles.deep]
+engine = "codex"      # codex exec --ephemeral -s read-only --output-schema FILE ...
+
+[ai.profiles.local]
+engine = "command"    # the prompt goes to stdin unless {prompt} is used
+command = ["my-agent", "--schema", "{schema_file}", "--out", "{output_file}"]
+
+[ai.tasks.find]
+profile = "fast"      # ai.tasks.ai and ai.tasks.find choose a profile per command
+```
+
+`--profile`, `--model` and `--effort` override these for one call. `tt doctor`
+checks that each referenced profile's binary is on `PATH` without calling a
+model.
+
+What tt sends and keeps:
+
+- Every call sends tt's own instructions, a JSON schema for the reply, and the
+  prompt file set in `ai.tasks.ai` or `ai.tasks.find`, if any. tt puts no
+  notes, checklists, reminders or server IDs into a prompt.
+- `tt ai` sends your request, the current time and time zone, and the names of
+  your lists and tags. Under `context = "minimal"`, the default, that is all.
+  With `context = "today"` it also sends the titles, list names and due dates
+  of up to 200 open tasks due today or overdue, and with `context = "all"`
+  those of up to 200 open tasks, each under a short local ref such as `t1`.
+- `tt ai find` sends the query, the current time and time zone, and the names
+  of your lists and tags. Only its ranking call sends task titles: the query
+  and up to 100 candidate titles. Under `context = "minimal"` that call is
+  made only with `--rerank`.
+- A request that looks like it holds a password, PIN, card number, key or
+  token is refused. Cached task titles, list names and tag names that look
+  like one are left out of the call, and tt says how many (`left_out` with
+  `--json`) without repeating them. A task left out has no ref, so the model
+  cannot change it; a candidate left out of a ranking is listed after the
+  ranked ones. `--allow-secrets` turns both checks off. The check knows common
+  key, webhook and bot token formats, card numbers, passwords and tokens
+  inside links (not the share, click and campaign IDs that common sites add to
+  them, such as `utm_*`, `fbclid`, `gclid`, `si` or `igsh`), and values written
+  right after words such as password, PIN, OTP or token, or after a door, SMS,
+  verification or backup code, in English or Russian (in Russian also after
+  the word for code alone); it can miss a secret.
+- The agent CLI passes what tt sends to its model provider, which handles it
+  under its own terms.
+- `claude` gets tt's instructions in place of its own system prompt, which is
+  then not sent at all; the CLI still adds a short note on its environment:
+  the temporary working directory, platform, shell and OS version. It runs
+  with no tools except the one it returns the structured reply through, no MCP
+  servers and no claude.ai connectors; without your user, project or local
+  settings, their hooks, your CLAUDE.md files or skills; with auto memory off;
+  without the second request it otherwise makes to name the session, which
+  would carry the request text again; and without saving the session. Only
+  tt's instructions go on its command line; the request goes on standard
+  input. With a Claude subscription, the request also carries the email
+  address of your account.
+- `codex` runs in a read-only sandbox with its shell, image viewing, apps, image
+  generation and web search tools turned off; without your `config.toml`, the
+  list of your skills, or its note on your working directory, shell, date and
+  time zone; and without saving the session. The models tt was tried with still
+  keep `exec`, which runs JavaScript with no file system or network access and
+  can call only `apply_patch` (whose writes the read-only sandbox refuses) and,
+  on gpt-6-astra, its clock tool; and `wait`, which waits on such a run. A model
+  with a multi-agent mode of its own (gpt-5.6-sol, and gpt-6-astra, the default)
+  also gets sub-agent tools, and gpt-6-astra a question tool and clock tools;
+  none of these reads a local file. codex runs with `--strict-config`, so a
+  switch codex has renamed makes the call fail instead of being ignored. It does
+  send your global `AGENTS.override.md` or, without one with more than
+  whitespace in it, `AGENTS.md` (in `$CODEX_HOME`, by default `~/.codex`) with
+  every call: codex has no switch that leaves it out, and `tt doctor` warns when
+  such a file is there. For the most privacy, use a `claude` profile.
+- A `command` profile runs your command as you, with whatever access that
+  gives it; it gets the prompt on standard input or, where `{prompt}` is used,
+  in its arguments, which other local processes can read.
+- Each call runs in a new temporary directory that tt deletes when the call
+  ends. codex writes the reply schema and its reply to files there, and an
+  image a call includes goes in as a link or copy under a neutral name there,
+  so the agent does not see where the image is kept.
+- The agent gets a short list of environment variables: `HOME`, `USER`,
+  `LOGNAME`, `SHELL`, `PATH`, `TMPDIR`, `LANG`, `LC_ALL`, `TERM`, and the proxy
+  and certificate settings. `claude` also gets `ANTHROPIC_API_KEY` and
+  `CLAUDE_CONFIG_DIR`, and `codex` gets `OPENAI_API_KEY` and `CODEX_HOME`, so
+  neither CLI sees the other's key; a `command` profile gets neither. Any
+  profile also gets the names it lists in `env`, but never `TT_*`, `HERDR_*`,
+  `XDG_CONFIG_HOME` or `XDG_DATA_HOME`.
+- Whatever the profile, a `command` profile included, interrupting tt or
+  closing its terminal kills the agent and every process it started that
+  stays in its process group; on macOS and Linux tt also kills what is left of
+  that group when the agent exits. A process that leaves the group, as a
+  daemon that calls setsid does, is not killed.
+- tt keeps no prompt and no raw reply. A preview is saved in the local cache
+  with its validated operations and a copy of each task they change, notes and
+  checklist included, so that accepting it can refuse a task changed since.
+  Accepting deletes it, except that a failed accept which left nothing applied
+  keeps it. A preview not accepted cannot be accepted after 24 hours, and the
+  next `tt ai`, `tt ai find` or accept after that deletes it.
 
 ## Configuration and files
 

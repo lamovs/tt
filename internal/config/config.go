@@ -27,6 +27,7 @@ type Config struct {
 	Timer          Timer
 	Sync           Sync
 	FocusUpload    FocusUpload
+	AI             AI
 }
 
 type ColorMode string
@@ -131,6 +132,7 @@ func Default() Config {
 			Interval:       model.Duration(60 * time.Second),
 			MoveByRecreate: MoveAsk,
 		},
+		AI: defaultAI(),
 	}
 }
 
@@ -224,6 +226,7 @@ type rawConfig struct {
 	Timer          rawTimer       `toml:"timer"`
 	Sync           rawSync        `toml:"sync"`
 	FocusUpload    rawFocusUpload `toml:"focus_upload"`
+	AI             rawAI          `toml:"ai"`
 }
 
 type rawTimer struct {
@@ -273,5 +276,6 @@ func toRaw(c Config) rawConfig {
 			MoveByRecreate: c.Sync.MoveByRecreate.String(),
 		},
 		FocusUpload: rawFocusUpload{Enabled: c.FocusUpload.Enabled},
+		AI:          toRawAI(c.AI),
 	}
 }

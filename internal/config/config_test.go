@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strings"
 	"testing"
@@ -59,7 +60,7 @@ func TestLoadMissingFileUsesDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load(): %v", err)
 	}
-	if got != Default() {
+	if !reflect.DeepEqual(got, Default()) {
 		t.Errorf("got %+v, want the defaults", got)
 	}
 }
@@ -134,8 +135,9 @@ enabled = true
 		},
 		Sync:        Sync{Interval: model.Duration(5 * time.Minute), MoveByRecreate: MoveAlways},
 		FocusUpload: FocusUpload{Enabled: true},
+		AI:          defaultAI(),
 	}
-	if got != want {
+	if !reflect.DeepEqual(got, want) {
 		t.Errorf("got %+v\nwant %+v", got, want)
 	}
 }
@@ -147,7 +149,7 @@ func TestPartialFileKeepsDefaults(t *testing.T) {
 	}
 	want := Default()
 	want.Timer.Focus = model.Duration(30 * time.Minute)
-	if got != want {
+	if !reflect.DeepEqual(got, want) {
 		t.Errorf("got %+v\nwant %+v", got, want)
 	}
 }
@@ -304,7 +306,7 @@ func TestEncodeRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the encoded config must load back: %v", err)
 	}
-	if got != Default() {
+	if !reflect.DeepEqual(got, Default()) {
 		t.Errorf("got %+v\nwant %+v", got, Default())
 	}
 	if !strings.Contains(string(src), `focus = '25m'`) {
@@ -334,6 +336,7 @@ func TestEncodeRoundTripsEveryStringFieldFamily(t *testing.T) {
 		},
 		Sync:        Sync{Interval: model.Duration(5 * time.Minute), MoveByRecreate: MoveAlways},
 		FocusUpload: FocusUpload{Enabled: true},
+		AI:          defaultAI(),
 	}
 
 	src, err := cfg.Encode()
@@ -344,7 +347,7 @@ func TestEncodeRoundTripsEveryStringFieldFamily(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the encoded config must load back: %v", err)
 	}
-	if got != cfg {
+	if !reflect.DeepEqual(got, cfg) {
 		t.Errorf("the full config changed in the round trip:\ngot  %+v\nwant %+v", got, cfg)
 	}
 	for _, key := range []string{
@@ -388,7 +391,7 @@ func TestEncodeEscapesTerminalUnsafeValuesAndPreservesIdentity(t *testing.T) {
 			if err != nil {
 				t.Fatalf("the encoded config must remain valid TOML: %v", err)
 			}
-			if got != cfg {
+			if !reflect.DeepEqual(got, cfg) {
 				t.Errorf("the terminal-safe round trip changed the config:\ngot  %+v\nwant %+v", got, cfg)
 			}
 		})
@@ -455,7 +458,7 @@ func TestEncodeQuotesLikeQuoteTOMLString(t *testing.T) {
 			if err != nil {
 				t.Fatalf("the encoded config must load back: %v\n%s", err, src)
 			}
-			if got != cfg {
+			if !reflect.DeepEqual(got, cfg) {
 				t.Errorf("the round trip changed the config:\ngot  %+v\nwant %+v", got, cfg)
 			}
 		})
@@ -590,7 +593,7 @@ func TestTemplateMatchesDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the template must load: %v", err)
 	}
-	if got != Default() {
+	if !reflect.DeepEqual(got, Default()) {
 		t.Errorf("the template drifted from the defaults:\ngot  %+v\nwant %+v", got, Default())
 	}
 }

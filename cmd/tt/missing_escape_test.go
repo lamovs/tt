@@ -160,6 +160,7 @@ var missingEscapeStructuredRenderers = map[string]bool{
 }
 
 var missingEscapeLocalLineBuilders = map[string]bool{
+	"aiError":       true,
 	"doctorNote":    true,
 	"doctorSummary": true,
 	"fixParagraph":  true,

@@ -111,7 +111,7 @@ func TestUndoTableCoversWhatTheStoreRecords(t *testing.T) {
 
 	for _, op := range []string{
 		store.OpTaskCreate, store.OpTaskUpdate, store.OpTaskComplete,
-		store.OpTaskDelete, store.OpTaskMoveRecreate,
+		store.OpTaskDelete, store.OpTaskMoveRecreate, store.OpTaskMoveNative,
 	} {
 		if _, ok := undoReversals[op]; !ok {
 			t.Errorf("the store records %q and the table has no row for it", op)

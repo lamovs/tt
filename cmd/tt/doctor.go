@@ -2511,11 +2511,16 @@ func collectDoctorChecks(ctx context.Context, probe func() configWriteObservatio
 	tokenResult, token := checkToken()
 	cacheResult, cache := checkCache(ctx)
 	cache.configWrite = probe()
-	return []checkResult{
+	checks := []checkResult{
 		tokenResult,
 		checkAPI(ctx, token, cache),
 		cacheResult,
 		checkConfig(cache),
 		checkNotifyWithConfigWrite(cache.configWrite),
+		checkAI(ctx),
 	}
+	if codex, ok := checkCodexInstructions(); ok {
+		checks = append(checks, codex)
+	}
+	return checks
 }

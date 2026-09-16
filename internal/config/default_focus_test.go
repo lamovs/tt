@@ -2,6 +2,7 @@ package config
 
 import (
 	"bytes"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -17,7 +18,7 @@ func TestDefaultFocusReferencesAndRoundTrip(t *testing.T) {
 			t.Fatal(err)
 		}
 		again, err := ParseBytes("test", encoded)
-		if err != nil || again != cfg {
+		if err != nil || !reflect.DeepEqual(again, cfg) {
 			t.Fatalf("round trip: %+v %v", again, err)
 		}
 	}

@@ -1695,6 +1695,22 @@ var missingEscapeExceptions = []missingEscapeException{
 		count:       1,
 		why:         "unsafeUndoReason maps the store error to one of four fixed tt-authored phrases; undoSubject passes task text through ReportTitle and the selected reversal supplies only fixed table text.",
 	},
+	{
+		file:        "undo.go",
+		scope:       "undoGroup",
+		sink:        "cli.WriteLines(inv.stdout, lines)",
+		fingerprint: "2559b14fcf4f1f2c906a9806756246908f8e4376e7ae07b0b4b6f91dc63be46c",
+		count:       1,
+		why:         "undoGroup refuses the whole group before reversing anything unless every record's op is a key in the closed undoReversals table with a say function. Each op only selects one fixed say function; those functions use ReportLine for task text and never copy the op into output. The header line, written only for a group of more than one record, carries only the record count.",
+	},
+	{
+		file:        "undo.go",
+		scope:       "undoGroup",
+		sink:        "fmt.Sprintf(\"%s: checklist cannot be replaced losslessly; %s %s cannot be reversed safely\", unsafeUndoReason(cause), rev.what, undoSubject(inv.ctx, st, e.Action, cli.PlainPalette()))",
+		fingerprint: "0f9d0bc2a8e44622ec9fe60c72330cbbca5422f1bb0d0529955be16224815bad",
+		count:       1,
+		why:         "The same refusal as cmdUndo's for the one record of a group whose reversal failed: unsafeUndoReason maps the store error to one of four fixed tt-authored phrases; undoSubject passes task text through ReportTitle and the selected reversal supplies only fixed table text.",
+	},
 }
 
 func TestEveryReportedForeignStringIsEscaped(t *testing.T) {

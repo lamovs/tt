@@ -107,7 +107,7 @@ func TestDottedTimerKeys(t *testing.T) {
 }
 
 func TestTableNames(t *testing.T) {
-	want := []string{"timer", "sync", "focus_upload"}
+	want := []string{"timer", "sync", "focus_upload", "ai"}
 	if got := TableNames(); !slices.Equal(got, want) {
 		t.Fatalf("TableNames() = %v, want %v", got, want)
 	}

@@ -33,7 +33,7 @@ func entityUndoOperation(ctx context.Context, q execer, action UndoAction) (Enti
 func (s *Store) PreviewEntityUndo(ctx context.Context, expected UndoEntry) (ResourceEntity, error) {
 	var entity ResourceEntity
 	err := s.Tx(ctx, func(tx *sql.Tx) error {
-		current, err := scanUndo(tx.QueryRowContext(ctx, `SELECT seq,at,payload FROM undo_log ORDER BY seq DESC LIMIT 1`))
+		current, err := scanUndo(tx.QueryRowContext(ctx, `SELECT `+undoColumns+` FROM undo_log ORDER BY seq DESC LIMIT 1`))
 		if err != nil {
 			return err
 		}

@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -41,38 +42,95 @@ func TestInterruptEndsTheRunWithTheInterruptedCode(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("neither the signal nor the \"sh -c\" the notifier runs under exists there")
 	}
+	// A hangup, which closing the terminal sends, and a quit, which Ctrl-\
+	// sends, end the run the same way.
+	for _, sig := range []syscall.Signal{syscall.SIGINT, syscall.SIGHUP, syscall.SIGQUIT} {
+		t.Run(sig.String(), func(t *testing.T) {
+			if sig == syscall.SIGHUP && signal.Ignored(syscall.SIGHUP) {
+				t.Skip("the tests run with hangups ignored, as under nohup, so tt is started ignoring them too")
+			}
+			cmd, stderr, marker := notifierChild(t)
+			if err := cmd.Start(); err != nil {
+				t.Fatal(err)
+			}
+			waitForFile(t, marker)
+			if err := cmd.Process.Signal(sig); err != nil {
+				t.Fatal(err)
+			}
+			cmd.Wait()
+
+			if got := cmd.ProcessState.ExitCode(); got != exitInterrupted {
+				t.Fatalf("tt ended as %v (code %d), want %d - a code of -1 means the signal killed it instead of cancelling it\nstderr: %s",
+					cmd.ProcessState, got, exitInterrupted, stderr.String())
+			}
+			if !strings.Contains(stderr.String(), "interrupted") {
+				t.Errorf("stderr = %q, want it to say the run was interrupted", stderr.String())
+			}
+		})
+	}
+}
+
+func TestAHangupTTWasStartedToIgnoreLeavesTheRunGoing(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("neither the signal nor the \"sh -c\" the notifier runs under exists there")
+	}
+	cmd, stderr, marker := notifierChild(t)
+	shell, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skip("no sh to start tt with hangups ignored")
+	}
+	// The way nohup starts it: an ignored signal stays ignored across exec.
+	cmd.Path, cmd.Args = shell, append([]string{"sh", "-c", `trap "" HUP; exec "$0" "$@"`}, cmd.Args...)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	waited := make(chan error, 1)
+	go func() { waited <- cmd.Wait() }()
+	defer cmd.Process.Kill()
+	waitForFile(t, marker)
+
+	if err := cmd.Process.Signal(syscall.SIGHUP); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-waited:
+		t.Fatalf("tt ended as %v on a hangup it was started to ignore\nstderr: %s", cmd.ProcessState, stderr.String())
+	case <-time.After(500 * time.Millisecond):
+	}
+
+	if err := cmd.Process.Signal(syscall.SIGINT); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-waited:
+	case <-time.After(10 * time.Second):
+		t.Fatal("tt did not end on the interrupt after the ignored hangup")
+	}
+	if got := cmd.ProcessState.ExitCode(); got != exitInterrupted {
+		t.Errorf("tt ended as %v (code %d), want %d\nstderr: %s", cmd.ProcessState, got, exitInterrupted, stderr.String())
+	}
+}
+
+// notifierChild prepares, without starting it, a tt child whose notify test
+// runs a notifier that touches marker and then sleeps, so a signal lands while
+// the run is busy.
+func notifierChild(t *testing.T) (*exec.Cmd, *bytes.Buffer, string) {
+	t.Helper()
 	dir := t.TempDir()
 	cfgDir := filepath.Join(dir, "config", "tt")
 	if err := os.MkdirAll(cfgDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-
 	marker := filepath.Join(dir, "notifier-started")
 	body := "[timer]\non_end = 'touch " + marker + "; sleep 30'\n"
 	if err := os.WriteFile(filepath.Join(cfgDir, config.FileName), []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
-
 	cmd := ttChild(t, dir, "notify", "test")
 	var stderr bytes.Buffer
 	cmd.Stdout = io.Discard
 	cmd.Stderr = &stderr
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
-	}
-	waitForFile(t, marker)
-	if err := cmd.Process.Signal(syscall.SIGINT); err != nil {
-		t.Fatal(err)
-	}
-	cmd.Wait()
-
-	if got := cmd.ProcessState.ExitCode(); got != exitInterrupted {
-		t.Fatalf("tt ended as %v (code %d), want %d - a code of -1 means the signal killed it instead of cancelling it\nstderr: %s",
-			cmd.ProcessState, got, exitInterrupted, stderr.String())
-	}
-	if !strings.Contains(stderr.String(), "interrupted") {
-		t.Errorf("stderr = %q, want it to say the run was interrupted", stderr.String())
-	}
+	return cmd, &stderr, marker
 }
 
 func TestSecondInterruptKillsWhatTheFirstCouldNotStop(t *testing.T) {

@@ -262,7 +262,9 @@ func (m browserModel) finishAction(msg actionFinished) (browserModel, tea.Cmd) {
 
 	}
 	if msg.kind == "undo" {
-		if msg.undo.Entry.Action.EntityRef != nil {
+		if len(msg.undo.Group) != 0 {
+			m.notice += fmt.Sprintf(" Global history applied to %d grouped operations.", len(msg.undo.Group))
+		} else if msg.undo.Entry.Action.EntityRef != nil {
 			m.notice = "Canceled the unsent resource operation from global history. No remote request was made."
 		} else {
 			m.notice += " Global history applied to " + msg.outcome.Task.Title + "."

@@ -61,6 +61,10 @@ type CacheState struct {
 type UndoPreview struct {
 	Entry store.UndoEntry
 	Title string
+
+	// Group lists what one undo reverses, newest first and Entry among them,
+	// when Entry belongs to an undo group; it is nil for an ungrouped record.
+	Group []UndoPreview
 }
 
 type Actions struct {
@@ -162,13 +166,43 @@ func (a *Actions) Complete(ctx context.Context, original model.Task, keepItems b
 }
 
 func (a *Actions) PreviewUndo(ctx context.Context) (UndoPreview, error) {
-	entry, err := a.store.LastUndo(ctx)
+	entries, err := a.store.LastUndoGroup(ctx)
 	if err != nil {
 		return UndoPreview{}, err
 	}
+	preview, err := a.previewUndoEntry(ctx, entries[0], true)
+	if err != nil {
+		return UndoPreview{}, err
+	}
+	if entries[0].Group == "" {
+		return preview, nil
+	}
+	preview.Group = []UndoPreview{preview}
+	for _, entry := range entries[1:] {
+		item, err := a.previewUndoEntry(ctx, entry, false)
+		if err != nil {
+			return UndoPreview{}, err
+		}
+		preview.Group = append(preview.Group, item)
+	}
+	return preview, nil
+}
+
+func (a *Actions) previewUndoEntry(ctx context.Context, entry store.UndoEntry, top bool) (UndoPreview, error) {
 	switch entry.Action.Op {
 	case store.OpEntityMutation:
-		entity, err := a.store.PreviewEntityUndo(ctx, entry)
+		var (
+			entity store.ResourceEntity
+			err    error
+		)
+		switch {
+		case top:
+			entity, err = a.store.PreviewEntityUndo(ctx, entry)
+		case entry.Action.EntityRef == nil:
+			err = store.ErrUndoIncomplete
+		default:
+			entity, err = a.store.Entity(ctx, *entry.Action.EntityRef)
+		}
 		if err != nil {
 			return UndoPreview{}, err
 		}
@@ -200,6 +234,17 @@ func (a *Actions) PreviewUndo(ctx context.Context) (UndoPreview, error) {
 }
 
 func (a *Actions) Undo(ctx context.Context, expected UndoPreview) (store.TaskMutationOutcome, error) {
+	if len(expected.Group) != 0 {
+		entries := make([]store.UndoEntry, len(expected.Group))
+		for i, item := range expected.Group {
+			entries[i] = item.Entry
+		}
+		tasks, err := a.store.ApplyUndoGroup(ctx, entries)
+		if err != nil {
+			return store.TaskMutationOutcome{}, err
+		}
+		return store.TaskMutationOutcome{Task: tasks[0], Changed: true}, nil
+	}
 	task, err := a.store.ApplyUndo(ctx, expected.Entry)
 	return store.TaskMutationOutcome{Task: task, Changed: err == nil}, err
 }

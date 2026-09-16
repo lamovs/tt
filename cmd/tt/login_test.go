@@ -760,8 +760,10 @@ func TestRestoreEchoOnSignalCoversEveryWayOutOfThePrompt(t *testing.T) {
 	}
 	t.Cleanup(func() { f.Close() })
 
-	for _, sig := range []syscall.Signal{syscall.SIGINT, syscall.SIGTERM} {
-		ctx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	// Every signal tt ends a run on, the ones it was not started with ignored.
+	for _, s := range ttSignals() {
+		sig := s.(syscall.Signal)
+		ctx, stopSignals := signal.NotifyContext(context.Background(), ttSignals()...)
 		exited := make(chan int, 1)
 		stop := restoreEchoOnSignal(ctx, &echoSwitch{f: f}, io.Discard, func(code int) { exited <- code })
 		if err := self.Signal(sig); err != nil {
@@ -780,33 +782,9 @@ func TestRestoreEchoOnSignalCoversEveryWayOutOfThePrompt(t *testing.T) {
 		stop()
 		stopSignals()
 	}
-
-	for _, tc := range []struct {
-		sig  syscall.Signal
-		want int
-	}{
-		{syscall.SIGQUIT, 131},
-		{syscall.SIGHUP, 129},
-	} {
-		exited := make(chan int, 1)
-		stop := restoreEchoOnSignal(context.Background(), &echoSwitch{f: f}, io.Discard, func(code int) { exited <- code })
-		if err := self.Signal(tc.sig); err != nil {
-			stop()
-			t.Fatalf("send %v: %v", tc.sig, err)
-		}
-		select {
-		case got := <-exited:
-			if got != tc.want {
-				t.Errorf("%v exits with %d, want %d", tc.sig, got, tc.want)
-			}
-		case <-time.After(5 * time.Second):
-			t.Errorf("%v never reached the watch", tc.sig)
-		}
-		stop()
-	}
 }
 
-func TestRestoreEchoOnSignalLeavesSIGINTToTheRootWatch(t *testing.T) {
+func TestRestoreEchoOnSignalLeavesTheRootSignalsToTheRootWatch(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("none of these signals is delivered to a process there")
 	}
@@ -820,26 +798,30 @@ func TestRestoreEchoOnSignalLeavesSIGINTToTheRootWatch(t *testing.T) {
 	}
 	t.Cleanup(func() { f.Close() })
 
-	ctx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stopSignals()
+	for _, s := range ttSignals() {
+		sig := s.(syscall.Signal)
+		ctx, stopSignals := signal.NotifyContext(context.Background(), ttSignals()...)
+		exited := make(chan int, 1)
+		stop := restoreEchoOnSignal(context.Background(), &echoSwitch{f: f}, io.Discard, func(code int) { exited <- code })
 
-	exited := make(chan int, 1)
-	stop := restoreEchoOnSignal(context.Background(), &echoSwitch{f: f}, io.Discard, func(code int) { exited <- code })
-	defer stop()
+		if err := self.Signal(sig); err != nil {
+			stop()
+			stopSignals()
+			t.Fatalf("send %v: %v", sig, err)
+		}
+		select {
+		case <-ctx.Done():
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%v never reached the root watch, so this proves nothing about the prompt watch", sig)
+		}
 
-	if err := self.Signal(syscall.SIGINT); err != nil {
-		t.Fatalf("send SIGINT: %v", err)
-	}
-	select {
-	case <-ctx.Done():
-	case <-time.After(5 * time.Second):
-		t.Fatal("SIGINT never reached the root watch, so this proves nothing about the prompt watch")
-	}
-
-	select {
-	case code := <-exited:
-		t.Fatalf("the prompt watch fired on SIGINT with %d; it is registered for a signal ttMain already owns", code)
-	case <-time.After(200 * time.Millisecond):
+		select {
+		case code := <-exited:
+			t.Errorf("the prompt watch fired on %v with %d; it is registered for a signal ttMain already owns", sig, code)
+		case <-time.After(200 * time.Millisecond):
+		}
+		stop()
+		stopSignals()
 	}
 }
 

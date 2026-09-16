@@ -358,6 +358,9 @@ func (m browserModel) dialogView() (string, []string) {
 		return m.columnDialogView()
 	}
 	if d.kind == "undo" {
+		if len(d.undo.Group) != 0 {
+			return "Global undo", wrapText(undoGroupText(d.undo.Group), width)
+		}
 		e := d.undo.Entry
 		if e.Action.EntityRef != nil {
 			ref := *e.Action.EntityRef
@@ -379,4 +382,19 @@ func (m browserModel) dialogView() (string, []string) {
 		policy = "Leave checklist items unchanged"
 	}
 	return "Complete task", wrapText(fmt.Sprintf("%s\nID: %s\nOpen checklist items: %d\n%s\nTab changes checklist policy\nEnter confirms | Esc cancels", d.original.Title, d.original.Id, count, policy), width)
+}
+
+func undoGroupText(group []app.UndoPreview) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "Undo group: %d operations, newest first\n", len(group))
+	for i, item := range group {
+		e := item.Entry
+		if ref := e.Action.EntityRef; ref != nil {
+			fmt.Fprintf(&b, "%d. Cancel unsent resource operation %d: %s (%s %s)\n", i+1, e.Action.OperationSeq, item.Title, ref.Kind, ref.Key)
+			continue
+		}
+		fmt.Fprintf(&b, "%d. %s: %s (ID: %s)\n", i+1, e.Action.Op, item.Title, e.Action.TaskID)
+	}
+	b.WriteString("All are reversed together or none is.\nApplies to global history, including CLI changes.\nRemote rollback is not promised.\nEnter confirms | Esc cancels")
+	return b.String()
 }

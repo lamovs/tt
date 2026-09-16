@@ -82,10 +82,13 @@ func (c *collector) add(key, format string, args ...any) {
 }
 
 func (c *collector) addAtParts(parts []string, msg string) {
-	key := identity(parts)
+	c.addAt(parts, c.lines[identity(parts)], msg)
+}
+
+func (c *collector) addAt(parts []string, line int, msg string) {
 	c.problems = append(c.problems, collectedProblem{
-		Problem: Problem{Line: c.lines[key], Msg: msg},
-		key:     key,
+		Problem: Problem{Line: line, Msg: msg},
+		key:     identity(parts),
 	})
 }
 

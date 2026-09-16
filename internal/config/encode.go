@@ -250,4 +250,94 @@ const template = `# tt configuration: $XDG_CONFIG_HOME/tt/config.toml, or ~/.con
 
 # [focus_upload]
 # enabled = false
+
+# [ai]
+# default = 'fast'
+# timeout = '1m30s'
+# context = 'minimal'  # minimal | today | all
+# fallback = []
+#
+#   'context' controls which cached tasks are sent along: 'minimal' sends no
+#   task titles (only 'tt ai find --rerank' sends the titles it found),
+#   'today' sends today's and overdue open tasks, and 'all' up to 200 open
+#   tasks. 'today' and 'all' leave out any task whose title looks like a
+#   secret.
+#
+# [ai.profiles]
+# [ai.profiles.fast]
+# engine = 'claude'
+# model = 'sonnet'
+# effort = 'high'
+#
+# [ai.tasks]
+#
+#   For engine = 'claude' or 'codex', tt builds the call itself from model
+#   and effort:
+#
+#     claude -p --system-prompt SYSTEM --model M --effort E
+#       --json-schema SCHEMA --output-format json --tools ''
+#       --strict-mcp-config --no-session-persistence --setting-sources ''
+#     codex exec -m M -c model_reasoning_effort=E --ephemeral -s read-only
+#       --skip-git-repo-check --ignore-user-config --strict-config
+#       --disable shell_tool --disable view_image --disable apps
+#       --disable image_generation --disable multi_agent
+#       -c 'web_search="disabled"'
+#       -c tools.experimental_request_user_input.enabled=false
+#       -c skills.include_instructions=false
+#       -c include_environment_context=false
+#       --output-schema FILE -o OUTFILE -C DIR --image=DIR/img-1.png -
+#
+#   SYSTEM is tt's own instructions for the call, in place of claude's
+#   default system prompt; codex gets them at the top of the prompt instead.
+#
+#   Neither agent gets a tool that reads local files or the web: claude runs
+#   with no tools of its own and no MCP servers, codex without its shell,
+#   image viewer, connectors, image generation and web search. No switch
+#   removes codex's wait tool or its exec tool, which runs JavaScript with no
+#   file system or network and can call only apply_patch, whose writes the
+#   read-only sandbox refuses, and on some models a clock tool. Some codex
+#   models also bring sub-agent, question or clock tools. None of these reads
+#   a file. Images go in as links with neutral names, not as your own paths.
+#   Neither agent sees your skills; claude does not see your CLAUDE.md files
+#   either, but codex still reads your global instructions,
+#   $CODEX_HOME/AGENTS.override.md when it holds more than whitespace and
+#   $CODEX_HOME/AGENTS.md otherwise, and offers no way to skip them.
+#
+#   engine = 'command' instead runs a literal argv, substituting {model}
+#   {effort} {schema} {schema_file} {output_file} {image} {prompt} where they
+#   appear. {image} must be a whole argument: it repeats once per image, or
+#   drops out when there are none; {prompt} takes the built prompt out of
+#   stdin and into that slot instead. A profile is always written in full:
+#   naming an existing profile again replaces it rather than merging fields.
+#
+#   Every call gets a short, fixed environment: HOME, PATH, locale, proxy and
+#   certificate settings, and for 'claude' or 'codex' that CLI's own API key
+#   and config location. No tt setting or credential is ever in it. A profile
+#   can list further variables to forward from tt's own environment, for
+#   example a remote ollama host for a 'command' engine profile:
+#
+#     env = ['OLLAMA_HOST']
+#
+#   Names starting with TT_ or HERDR_, and XDG_CONFIG_HOME and
+#   XDG_DATA_HOME, are rejected here: tt's own settings and credentials are
+#   never forwarded, however a profile is written.
+#
+#   Further profiles and tasks are named tables the same way, for example:
+#
+#     [ai.profiles.deep]
+#     engine = 'codex'
+#     model = 'gpt-5.6-sol'
+#     effort = 'high'
+#
+#     [ai.profiles.local]
+#     engine = 'command'
+#     command = ['ollama', 'run', 'llava']
+#     env = ['OLLAMA_HOST']
+#
+#     [ai.tasks.ai]
+#     profile = 'fast'
+#     prompt = '~/.config/tt/prompts/ai.md'
+#
+#     [ai.tasks.find]
+#     profile = 'fast'
 `

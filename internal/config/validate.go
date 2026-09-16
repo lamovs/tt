@@ -154,6 +154,8 @@ func (c *collector) build(r rawConfig) Config {
 	}
 	cfg.FocusUpload.Enabled = r.FocusUpload.Enabled
 
+	cfg.AI = c.buildAI(r.AI, cfg.AI.Timeout)
+
 	return cfg
 }
 
@@ -193,41 +195,71 @@ func allowedPlaceholders() string {
 
 func (c *collector) checkUnknown(md toml.MetaData) {
 	leaves, tables := knownKeys()
+	named := namedTables()
 	type unknownTable struct {
 		parts []string
 		name  string
 	}
 	unknownTables := make(map[keyIdentity]unknownTable)
-	isKnownTable := func(parts []string) bool {
-		if len(parts) != 1 {
-			return false
+	markUnknown := func(parts []string) {
+		unknownTables[identity(parts)] = unknownTable{
+			parts: append([]string(nil), parts...),
+			name:  strings.Join(parts, "."),
 		}
-		_, known := leaves[parts[0]]
-		return known
+	}
+	// tableKeys returns the keys a table accepts, and whether tt knows the
+	// table at all: the root, a top-level table, or a named sub-table such
+	// as [ai.profiles.fast] whose name its named table allows.
+	tableKeys := func(parts []string) ([]string, bool) {
+		switch len(parts) {
+		case 0:
+			return leaves[""], true
+		case 1:
+			keys, known := leaves[parts[0]]
+			return keys, known
+		case 3:
+			sub, known := named[[2]string{parts[0], parts[1]}]
+			if !known || !sub.allows(parts[2]) {
+				return nil, false
+			}
+			return sub.leaves, true
+		}
+		return nil, false
 	}
 	for _, k := range md.Undecoded() {
 		parts := []string(k)
 		if md.Type(k...) == "Hash" {
-			if !isKnownTable(parts) {
-				unknownTables[identity(parts)] = unknownTable{
-					parts: append([]string(nil), parts...),
-					name:  strings.Join(parts, "."),
-				}
+			if _, known := tableKeys(parts); !known {
+				markUnknown(parts)
 			}
 			continue
 		}
 		if len(parts) > 1 {
-			tableParts := parts[:len(parts)-1]
-			if !isKnownTable(tableParts) {
-				unknownTables[identity(tableParts)] = unknownTable{
-					parts: append([]string(nil), tableParts...),
-					name:  strings.Join(tableParts, "."),
-				}
+			if _, known := tableKeys(parts[:len(parts)-1]); !known {
+				markUnknown(parts[:len(parts)-1])
 			}
 		}
 	}
+	// A sub-table under a name its named table does not allow still decodes
+	// into the map, so it is never undecoded: find it among all the keys,
+	// however it was spelled (header, dotted key or inline table).
+	for _, k := range md.Keys() {
+		parts := []string(k)
+		if len(parts) < 3 {
+			continue
+		}
+		if sub, isNamed := named[[2]string{parts[0], parts[1]}]; isNamed && !sub.allows(parts[2]) {
+			markUnknown(parts[:3])
+		}
+	}
 	for _, table := range unknownTables {
-		c.addAtParts(table.parts, fmt.Sprintf("unknown table %q%s", table.name, suggest(table.name, tables, nil)))
+		// A table inside another unknown table is that table's mistake,
+		// already reported once, whatever line either of them is on.
+		if insideUnknown(unknownTables, table.parts) {
+			continue
+		}
+		msg := fmt.Sprintf("unknown table %q%s", table.name, unknownTableHint(table.parts, tables, named))
+		c.addAt(table.parts, c.lineOf(md, table.parts), msg)
 	}
 
 	for _, k := range md.Undecoded() {
@@ -235,25 +267,136 @@ func (c *collector) checkUnknown(md toml.MetaData) {
 		if md.Type(k...) == "Hash" {
 			continue
 		}
-		table, name := "", strings.Join(parts, ".")
-		tableParts := []string(nil)
-		if len(parts) > 1 {
-			tableParts = parts[:len(parts)-1]
-			table, name = strings.Join(tableParts, "."), parts[len(parts)-1]
-		}
+		tableParts, name := parts[:len(parts)-1], parts[len(parts)-1]
 		if _, unknown := unknownTables[identity(tableParts)]; unknown {
 			continue
 		}
+		table := strings.Join(tableParts, ".")
 		qualify := func(s string) string {
 			if table == "" {
 				return s
 			}
 			return table + "." + s
 		}
+		keys, _ := tableKeys(tableParts)
 		path := strings.Join(parts, ".")
-		c.addAtParts(parts, fmt.Sprintf("unknown key %q%s", path, suggest(name, leaves[table], qualify)))
+		c.addAt(parts, c.lineOf(md, parts), fmt.Sprintf("unknown key %q%s", path, suggest(name, keys, qualify)))
 	}
 }
+
+// insideUnknown reports whether a table around parts is among unknown.
+func insideUnknown[T any](unknown map[keyIdentity]T, parts []string) bool {
+	for n := 1; n < len(parts); n++ {
+		if _, found := unknown[identity(parts[:n])]; found {
+			return true
+		}
+	}
+	return false
+}
+
+// lineOf is the line to report a problem about parts at: the line of its own
+// key or header; for a table written only through what is under it (a
+// dotted key, a deeper header), the line of the first key under it; for a
+// key inside an inline table, the line of the closest table around it.
+func (c *collector) lineOf(md toml.MetaData, parts []string) int {
+	if line := c.lines[identity(parts)]; line > 0 {
+		return line
+	}
+	for _, k := range md.Keys() {
+		if len(k) > len(parts) && slices.Equal([]string(k[:len(parts)]), parts) {
+			if line := c.lines[identity(k)]; line > 0 {
+				return line
+			}
+		}
+	}
+	for n := len(parts) - 1; n > 0; n-- {
+		if line := c.lines[identity(parts[:n])]; line > 0 {
+			return line
+		}
+	}
+	return 0
+}
+
+// unknownTableHint is the suggestion for an unknown table: for a sub-table
+// whose name its named table does not allow, the closest allowed name, or
+// the full list when none is close; for a misspelt named table, such as
+// [ai.profil.fast], the same path with the closest named table in it;
+// otherwise the closest top-level table.
+func unknownTableHint(parts, tables []string, named map[[2]string]namedTable) string {
+	if len(parts) == 3 {
+		if sub, isNamed := named[[2]string{parts[0], parts[1]}]; isNamed && sub.names != nil {
+			prefix := parts[0] + "." + parts[1] + "."
+			if hint := suggest(parts[2], sub.names, func(s string) string { return prefix + s }); hint != "" {
+				return hint
+			}
+			return fmt.Sprintf(" (allowed: %s)", strings.Join(sub.names, ", "))
+		}
+	}
+	if len(parts) >= 2 {
+		if _, isNamed := named[[2]string{parts[0], parts[1]}]; !isNamed {
+			var fields []string
+			for path := range named {
+				if path[0] == parts[0] {
+					fields = append(fields, path[1])
+				}
+			}
+			slices.Sort(fields)
+			rest := ""
+			if len(parts) > 2 {
+				rest = "." + strings.Join(parts[2:], ".")
+			}
+			if hint := suggest(parts[1], fields, func(s string) string { return parts[0] + "." + s + rest }); hint != "" {
+				return hint
+			}
+		}
+	}
+	return suggest(strings.Join(parts, "."), tables, nil)
+}
+
+// namedTable is a table whose sub-tables the user names, such as
+// [ai.profiles.<name>]: a map of structs inside a top-level table.
+type namedTable struct {
+	// leaves are the keys every sub-table accepts, from the struct's tags.
+	leaves []string
+
+	// names are the only names a sub-table may take; nil allows any.
+	names []string
+}
+
+func (t namedTable) allows(name string) bool {
+	return t.names == nil || slices.Contains(t.names, name)
+}
+
+// namedTableNames restricts the sub-table names of a named table, keyed by
+// its path; a named table left out, such as ai.profiles, takes any name.
+var namedTableNames = map[[2]string][]string{
+	{"ai", "tasks"}: aiTaskNames,
+}
+
+var namedTables = sync.OnceValue(func() map[[2]string]namedTable {
+	named := map[[2]string]namedTable{}
+	t := reflect.TypeOf(rawConfig{})
+	for i := range t.NumField() {
+		table := t.Field(i)
+		if table.Type.Kind() != reflect.Struct {
+			continue
+		}
+		for j := range table.Type.NumField() {
+			field := table.Type.Field(j)
+			if field.Type.Kind() != reflect.Map || field.Type.Elem().Kind() != reflect.Struct {
+				continue
+			}
+			path := [2]string{table.Tag.Get("toml"), field.Tag.Get("toml")}
+			sub := namedTable{names: namedTableNames[path]}
+			elem := field.Type.Elem()
+			for k := range elem.NumField() {
+				sub.leaves = append(sub.leaves, elem.Field(k).Tag.Get("toml"))
+			}
+			named[path] = sub
+		}
+	}
+	return named
+})
 
 var knownKeys = sync.OnceValues(func() (map[string][]string, []string) {
 	leaves := map[string][]string{"": nil}

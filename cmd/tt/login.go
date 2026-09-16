@@ -9,14 +9,12 @@ import (
 	"net"
 	"os"
 	"os/exec"
-	"os/signal"
 	"path/filepath"
 	"runtime"
 	"slices"
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"unicode"
 
 	"github.com/movsar/tt/internal/api"
@@ -568,15 +566,14 @@ func (e *echoSwitch) restoreWith(pending pendingInput) {
 	_ = toggleEcho(e.f, true, pending)
 }
 
+// restoreEchoOnSignal gives echo back when a signal ends tt during a hidden
+// prompt. Every signal that does reaches it through ctx, which ttMain cancels
+// on ttSignals; it listens for none itself, so no signal has two handlers
+// racing, and none that tt was started with ignored is taken back.
 func restoreEchoOnSignal(ctx context.Context, echo *echoSwitch, stderr io.Writer, exit func(int)) (stop func()) {
-	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, syscall.SIGQUIT, syscall.SIGHUP)
 	done := make(chan struct{})
 	go func() {
 		select {
-		case s := <-sig:
-			echo.restoreDiscarding()
-			exit(signalExitCode(s))
 		case <-ctx.Done():
 			echo.restoreDiscarding()
 
@@ -585,17 +582,7 @@ func restoreEchoOnSignal(ctx context.Context, echo *echoSwitch, stderr io.Writer
 		case <-done:
 		}
 	}()
-	return func() {
-		signal.Stop(sig)
-		close(done)
-	}
-}
-
-func signalExitCode(s os.Signal) int {
-	if num, ok := s.(syscall.Signal); ok {
-		return 128 + int(num)
-	}
-	return exitInterrupted
+	return func() { close(done) }
 }
 
 func ignoreEOF(err error) error {

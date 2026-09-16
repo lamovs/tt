@@ -214,7 +214,7 @@ var indexOrder = []struct {
 	title string
 	verbs []string
 }{
-	{"Everyday tasks", []string{"ui", "add", "ls", "s", "today", "show", "edit", "item", "repeat", "remind", "done", "due", "schedule", "pri", "mv", "rm", "undo"}},
+	{"Everyday tasks", []string{"ui", "add", "ls", "s", "today", "show", "edit", "item", "repeat", "remind", "done", "due", "schedule", "pri", "mv", "rm", "undo", "ai"}},
 	{"Focus and time", []string{"timer", "pomodoro"}},
 	{"Projects and resources", []string{"project", "folder", "tag", "habit", "comment", "countdown"}},
 	{"Setup and maintenance", []string{"setup", "login", "auth", "sync", "auto", "doctor", "config", "notify", "help", "version"}},
