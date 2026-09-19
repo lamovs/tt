@@ -487,6 +487,13 @@ func editTaskTxOutcome(ctx context.Context, tx *sql.Tx, id, op, kind string, bui
 	if err := validateTaskExtensions(ctx, tx, cur, e); err != nil {
 		return TaskMutationOutcome{}, err
 	}
+	// Every way a task is closed builds its edit here - tt done, the key of
+	// the browser, an applied tt ai plan, a batch that marked a task [x] -
+	// so the closing end of the parent rule is read once, in the same
+	// transaction as the write it guards.
+	if err := validateTaskClosure(ctx, tx, cur, e); err != nil {
+		return TaskMutationOutcome{}, err
+	}
 	if e.IsEmpty() {
 		return TaskMutationOutcome{Task: cur}, nil
 	}

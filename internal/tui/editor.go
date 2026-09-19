@@ -139,7 +139,7 @@ type recoveryPanel struct {
 
 func (m browserModel) recoveryLines() []string {
 	r := m.recovery
-	lines := wrapText(r.message, max(1, m.width-4))
+	lines := wrapText(m.revealTitles(r.message), max(1, m.width-4))
 	if r.path != "" {
 		lines = append(lines, "", "Draft kept at:")
 		lines = append(lines, wrapText(r.path, max(1, m.width-4))...)
@@ -176,7 +176,7 @@ func (m browserModel) finishEditor(msg editorFinished) (browserModel, tea.Cmd) {
 		if msg.result.Outcome.Changed {
 			m.notice = "Saved locally (editor). Remote confirmation requires sync."
 			task := msg.result.Outcome.Task
-			m.notice += " " + task.Title + " [" + task.Id + "]."
+			m.notice += " " + markTitle(task.Title) + " [" + task.Id + "]."
 		}
 	}
 	if msg.result.CleanupError != nil {

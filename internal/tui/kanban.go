@@ -289,7 +289,7 @@ func (m browserModel) boardView() []string {
 			if task.Kind == "NOTE" {
 				box = "[N] "
 			}
-			text := marker(task.Id == m.taskID) + box + displayClipped(task.Title, max(1, width-10))
+			text := marker(task.Id == m.taskID) + box + displayClipped(m.conceal(task.Title, hiddenTitle), max(1, width-10))
 			lines = append(lines, text)
 		}
 		if len(lines) == 0 {

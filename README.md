@@ -128,8 +128,8 @@ either mode. Run `tt help <command>` for complete syntax and examples.
 Commands by area:
 
 - browse: `ui`, `today`, `ls`, `s`, `show`
-- change tasks: `add`, `edit`, `item`, `done`, `pri`, `due`, `schedule`,
-  `repeat`, `remind`, `mv`, `rm`, `undo`, `ai`
+- change tasks: `add`, `batch`, `edit`, `item`, `done`, `pri`, `due`,
+  `schedule`, `repeat`, `remind`, `mv`, `rm`, `undo`, `ai`
 - focus: `timer`, `pomodoro`
 - setup and maintenance: `setup`, `login`, `sync`, `auto`, `doctor`, `config`, `notify`
 - documentation: `help`, `version`
@@ -177,6 +177,7 @@ Start the interface in a normal terminal:
 
 ```sh
 tt ui
+tt ui --private
 ```
 
 WezTerm works directly; tmux and Herdr are optional and are not required.
@@ -216,6 +217,20 @@ Other workspaces:
 - `S`: settings; `r` reloads, `g` chooses default focus, `i` initializes the
   config, `d` runs doctor, `n` tests notifications, and `l`/`L` previews login
 - `Ctrl+O`: show the `1`/`2`/`3` panel hints
+
+Private mode:
+
+- `tt ui --private` starts the interface with task content already hidden,
+  from the very first frame
+- `Ctrl+K` toggles private mode in both directions and works everywhere,
+  including inside forms
+- private mode is off by default and does not persist between runs
+- hidden: task titles in the task panel, Kanban cards, and the details
+  panel; list names, counts, dates, and priorities stay visible
+- the `/` filter inside the task panel is hidden too, since it filters the
+  same task rows
+- not hidden: edit and checklist forms, the queue workspace, the Focus
+  workspace, the delete and move previews, and the server query workspace
 
 Forms save locally with `Ctrl+S`. Destructive and remote-sensitive actions show
 a preview and require confirmation. If data changes concurrently, `tt` refuses
@@ -467,7 +482,22 @@ keep their original protocol.
 Task estimates use seconds and Pomodoro counts from 0 to 60. Writes use the
 provider's nested `focusSummaries` format without sending observed counters.
 Ambiguous multiple summaries are retained but not edited. Parent edits reject
-cycles and cross-project relationships. `columnId`, child IDs, sort order and
+cycles, cross-project relationships and a parent that is not open. A parent
+that has not reached the server yet is accepted while its own creation is the
+only queued change for it, so `tt add A`, `tt add B` and
+`tt edit B --parent A` need no `tt sync` in between: the creation of the parent
+carries a lower `seq` than the link, the queue sends the entries that are ready
+to go in `seq` order, and confirming the creation rewrites the queued link to
+the ID the server returned. The queue is not strictly FIFO - it steps over the
+entries that are parked or held behind an older entry of the same task - so
+what keeps a link behind its parent is the push itself: a link that still names
+a local ID is parked rather than sent, and `tt sync --retry-failed` returns it
+to the queue once the creation of the parent has been confirmed. The child
+remains a top-level task until that link goes out. The rule holds from the
+other end as well: a parent cannot be completed while the link that hangs a
+child under it is still queued, whatever phase that link is in, and `tt sync`
+is what clears the refusal. Any other queued change on the parent chain is
+still refused. `columnId`, child IDs, sort order and
 unknown server fields survive caching. To assign an existing confirmed column:
 
 ```sh
@@ -546,6 +576,99 @@ computable timestamps and local delivery eligibility. Missing reference policy,
 calendar month/day behavior, all-day conventions and ambiguous civil times are
 reported explicitly. The accepted local delivery allowlist is unchanged; an
 interpreted timestamp does not establish provider semantics or device receipt.
+
+## Batch creation
+
+`tt batch` opens your editor with a short template, reads the document you save
+as a list of tasks, prints what it read, and creates all of it as one change,
+so a single `tt undo` removes every task again.
+
+```
+# Work
+Buy milk
+  [ ] two liters
+  [x] receipt
+Fix the sink
+  call a plumber
+  [ ] buy a wrench
+
+# Home
+[x] Water plants
+```
+
+- One line is one task. `# Name` puts the tasks below it in that list; the
+  tasks written above the first heading go to `-P`, or to `default_project`
+  when `-P` is absent.
+- A heading is one to six `#`, a space, and the name. A line without
+  indentation that starts with `#` and is not that - `#Work`, `###`,
+  `####### Seven` - is refused with its line, never read as a task: taken as
+  one it would write its whole block into whatever list was open, without ever
+  looking a name up.
+- An indented line belongs to the task its block starts with - the nearest
+  line above it that carries no indentation - and not to the line right above
+  it. In the example both `call a plumber` and `buy a wrench` belong to
+  `Fix the sink`.
+- Indent every line of one block the same way, with tabs or with spaces. A
+  block indented both ways is refused whichever of the two opens it, because
+  the two cannot be compared; only one level of indentation is read.
+- With `[ ]` or `[x]` in front, an indented line is a checklist item of that
+  task, and `[x]` marks the item done. A `[x]` on a task line creates the task
+  and completes it at once, and leaves its checklist as the document wrote it:
+  items left open stay open, which is what the preview showed.
+- Any other indented line is a child task of that same task. tt creates it
+  as a task of its own and then hangs it under its parent, so the task and the
+  relationship belong to the same batch and the same undo.
+- That relationship travels as a separate operation, sent once the creation of
+  the parent is confirmed. Until then the push parks it rather than sending a link
+  to a local ID; `tt sync --retry-failed` returns it to the queue after the
+  parent has been confirmed, and the child stays a top-level task in the
+  meantime.
+- A task marked `[x]` may not have child tasks of its own, and a document that
+  asks for one is refused with its line: a child can only be hung under an open
+  task, and completing the parent first only moves the refusal to the push,
+  where the relationship would be parked with the same reason. Remove the
+  `[x]`, or write the children as tasks of their own.
+- A leading `-`, `*`, `+`, `1.` or `1)` marker is optional decoration on any
+  line. A line that is only decoration is refused: after the marker and the
+  checkbox a line needs one letter or digit left to name a task by, so a
+  marker somebody left alone, or a `---` drawn across the document, never
+  becomes a task called `-` or `---`.
+- Blank lines and lines starting with `//` are ignored, so the hints tt
+  prefills cost nothing. Leaving the document unchanged or empty creates
+  nothing.
+- Unknown list names are refused, never created: a list has no ID before
+  `tt sync`, so it cannot be written to in the same batch. One document holds
+  at most 200 tasks and 200 checklist items per task.
+
+```sh
+tt batch
+tt batch -P work
+tt batch --preview
+tt batch --accept PREVIEW_ID
+tt batch -y
+```
+
+In a terminal tt asks before creating anything. `--preview` only saves a
+preview and prints the ID that accepts it, `-y` creates without asking, and
+`--accept ID` applies a saved preview once, within 24 hours. Those hours are
+counted from the moment tt read the document, not from the moment the editor
+opened, so however long you write costs the preview nothing. The lists it
+writes to are read against the cache again when it is accepted, so a preview
+whose list has closed or left the cache is refused rather than written
+elsewhere. Without a terminal tt refuses rather than ask nobody.
+
+Applying is not one transaction. tt creates the tasks one after another, all
+under one undo group, so a `kill -9` in the middle leaves the tasks it had
+already created; `tt undo` then removes that group whole, whatever part of it
+is there. If one task fails while applying, tt removes every task of the batch
+itself at once - unless a change of another run was recorded in between, which
+stops the removal: tt says then how many tasks of the batch are still there
+and leaves them to `tt undo`. A document tt cannot read or cannot resolve
+against the cache leaves the editor draft on disk and names the file, so
+nothing you typed is lost, and so does a run whose own preview is gone by the
+time it comes to apply it. The draft is removed once the document is
+somewhere else: in the tasks the batch created, or in a preview whose ID you
+were given.
 
 ## AI
 

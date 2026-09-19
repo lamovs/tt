@@ -719,3 +719,404 @@ func TestOrphanedLocalTasksFindsARowNoCreateWillResolve(t *testing.T) {
 		t.Fatalf("the task with a queued create was touched: %v", err)
 	}
 }
+
+// TestReplaceLocalIDMovesTheRowsThatPointAtTheOldID covers both branches of
+// the swap: a local parent that is renamed into its server id, and one that
+// merges into a row a pull already brought in. In both cases the rows naming
+// the old id are other rows, and a child left with a local parent could not
+// be edited again.
+func TestReplaceLocalIDMovesTheRowsThatPointAtTheOldID(t *testing.T) {
+	for _, merged := range []bool{false, true} {
+		t.Run(map[bool]string{false: "renamed", true: "merged"}[merged], func(t *testing.T) {
+			ctx := context.Background()
+			s := testStore(t)
+			seedProjects(t, s, model.Project{Id: "p1", Name: "P"})
+			if merged {
+				if _, err := s.SyncProject(ctx, "p1", fromServer(openTask("srv1", "p1", "Parent"))); err != nil {
+					t.Fatal(err)
+				}
+			}
+			parent, err := s.CreateTask(ctx, model.Task{ProjectId: "p1", Title: "Parent"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			child, err := s.CreateTask(ctx, model.Task{ProjectId: "p1", Title: "Child", ParentId: parent.Id})
+			if err != nil {
+				t.Fatalf("create a child of a parent waiting for its own create: %v", err)
+			}
+			holder, err := s.CreateTask(ctx, model.Task{ProjectId: "p1", Title: "Holder", ChildIds: []string{parent.Id}})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if err := s.ReplaceLocalID(ctx, parent.Id, "srv1"); err != nil {
+				t.Fatalf("swap: %v", err)
+			}
+
+			got, err := s.Task(ctx, child.Id)
+			if err != nil || got.ParentId != "srv1" {
+				t.Fatalf("child parent = %q (%v), want srv1", got.ParentId, err)
+			}
+			kept, err := s.Task(ctx, holder.Id)
+			if err != nil || len(kept.ChildIds) != 1 || kept.ChildIds[0] != "srv1" {
+				t.Fatalf("cached child ids = %v (%v), want srv1", kept.ChildIds, err)
+			}
+			var stale int
+			if err := s.DB().QueryRowContext(ctx,
+				`SELECT count(*) FROM tasks WHERE parent_id = ? OR instr(child_ids, ?) > 0`,
+				parent.Id, parent.Id).Scan(&stale); err != nil {
+				t.Fatal(err)
+			}
+			if stale != 0 {
+				t.Errorf("%d cached rows still point at the local id", stale)
+			}
+		})
+	}
+}
+
+func TestDropParkedLeavesNoReferenceToTheTaskItRemoved(t *testing.T) {
+	ctx := context.Background()
+	s := testStore(t)
+	seedProjects(t, s, model.Project{Id: "p1", Name: "P"})
+
+	parent, err := s.CreateTask(ctx, model.Task{ProjectId: "p1", Title: "Parent"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, err := s.CreateTask(ctx, model.Task{ProjectId: "p1", Title: "Child"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.UpdateTask(ctx, child.Id, model.TaskEdit{ParentId: model.Ptr(parent.Id)}); err != nil {
+		t.Fatalf("queue the child's link to the parent: %v", err)
+	}
+
+	holder := openTask("srv-holder", "p1", "Holder")
+	holder.ChildIds = []string{parent.Id, "srv-child"}
+	if _, err := s.SyncProject(ctx, "p1", fromServer(holder)); err != nil {
+		t.Fatal(err)
+	}
+
+	items := claimAll(t, s)
+	var parentCreate OutboxItem
+	for _, it := range items {
+		if it.Op == OpTaskCreate && it.TaskID == parent.Id {
+			parentCreate = it
+		}
+	}
+	if parentCreate.Seq == 0 {
+		t.Fatalf("no queued create for the parent among %+v", items)
+	}
+	if err := s.MarkFailed(ctx, parentCreate.Seq, parentCreate.LeaseToken, "connection reset"); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := s.DropParked(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := s.Task(ctx, parent.Id); !errors.Is(err, ErrNotFound) {
+		t.Errorf("the dropped parent is still in the cache: %v", err)
+	}
+	gotChild, err := s.Task(ctx, child.Id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotChild.ParentId != "" {
+		t.Errorf("child parent_id = %q, want cleared once the parent is gone", gotChild.ParentId)
+	}
+
+	gotHolder, err := s.Task(ctx, "srv-holder")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(gotHolder.ChildIds) != 1 || gotHolder.ChildIds[0] != "srv-child" {
+		t.Errorf("holder child ids = %+v, want only the id that was never dropped", gotHolder.ChildIds)
+	}
+}
+
+// queuedLinkParents reads back which task each queued relationship hangs its
+// own task under, the way the push reads it.
+func queuedLinkParents(t *testing.T, st *Store) map[string]string {
+	t.Helper()
+	queue, err := st.RecoveryQueue(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := map[string]string{}
+	for _, entry := range queue.Tasks {
+		parent, hangs, err := TaskExtensionParent(entry.Item)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if hangs {
+			out[entry.Item.TaskID] = parent
+		}
+	}
+	return out
+}
+
+// The relationship that hangs a task under another one is queued against the
+// child, so throwing the parent away leaves it behind pointing at an id
+// nothing holds any more; the next push parks it over a parent that is not in
+// the cache and a second tt sync --drop-parked is what it takes to be rid of
+// it. Relationships hung under anything else are none of this drop's
+// business.
+func TestDroppingAnOrphanedLocalTaskTakesTheRelationshipsHungUnderIt(t *testing.T) {
+	ctx := context.Background()
+	st := testStore(t)
+	seedProjects(t, st, model.Project{Id: "p1", Name: "P"})
+	var tasks []model.Task
+	for _, title := range []string{"Parent", "Child", "Other parent", "Other child"} {
+		task, err := st.CreateTask(ctx, model.Task{ProjectId: "p1", Title: title})
+		if err != nil {
+			t.Fatal(err)
+		}
+		tasks = append(tasks, task)
+	}
+	parent, child, other, otherChild := tasks[0], tasks[1], tasks[2], tasks[3]
+	for _, link := range []struct{ child, parent string }{{child.Id, parent.Id}, {otherChild.Id, other.Id}} {
+		if _, err := st.UpdateTask(ctx, link.child, model.TaskEdit{ParentId: model.Ptr(link.parent)}); err != nil {
+			t.Fatalf("queue the relationship of %s: %v", link.child, err)
+		}
+	}
+	for _, item := range claimAll(t, st) {
+		if item.TaskID == parent.Id {
+			if err := st.MarkFailed(ctx, item.Seq, item.LeaseToken, "rejected"); err != nil {
+				t.Fatal(err)
+			}
+			continue
+		}
+		if err := st.MarkDone(ctx, item.Seq, item.LeaseToken); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := queuedLinkParents(t, st); got[child.Id] != parent.Id {
+		t.Fatalf("queued relationships before the drop = %v, want the child hung under the parent", got)
+	}
+
+	dropped, err := st.DropParked(ctx)
+	if err != nil || len(dropped) != 1 {
+		t.Fatalf("tt sync --drop-parked = %+v %v, want the parked create thrown away", dropped, err)
+	}
+	if _, err := st.Task(ctx, parent.Id); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("the dropped parent = %v, want it gone from the cache", err)
+	}
+	links := queuedLinkParents(t, st)
+	if _, left := links[child.Id]; left {
+		t.Fatalf("queued relationships after the drop = %v, want nothing left hung under the dropped task", links)
+	}
+	if links[otherChild.Id] != other.Id {
+		t.Fatalf("queued relationships after the drop = %v, want the relationship of another parent untouched", links)
+	}
+	// The child itself is not what the reader threw away, and the cache no
+	// longer shows it under a task that is gone.
+	stored, err := st.Task(ctx, child.Id)
+	if err != nil || stored.ParentId != "" {
+		t.Fatalf("the child after the drop = %+v %v, want it kept and detached", stored, err)
+	}
+}
+
+func TestDropParkedChildLinkAllowsFuturePull(t *testing.T) {
+	ctx := context.Background()
+	st, parent := localParentFixture(t)
+	if _, err := st.UpdateTask(ctx, "child", model.TaskEdit{ParentId: model.Ptr(parent.Id)}); err != nil {
+		t.Fatal(err)
+	}
+	claimed, _, err := st.Claim(ctx, 1, time.Minute)
+	if err != nil || len(claimed) != 1 || claimed[0].TaskID != parent.Id {
+		t.Fatalf("claim: %v %v", claimed, err)
+	}
+	if err := st.MarkFailed(ctx, claimed[0].Seq, claimed[0].LeaseToken, "rejected"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.DropParked(ctx); err != nil {
+		t.Fatal(err)
+	}
+	counts, err := st.OutboxCounts(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var dirty int
+	if err := st.DB().QueryRowContext(ctx, "SELECT dirty FROM tasks WHERE id='child'").Scan(&dirty); err != nil {
+		t.Fatal(err)
+	}
+	result, err := st.SyncProject(ctx, "p1", []ServerTask{{Task: model.Task{Id: "child", ProjectId: "p1", Title: "Updated on server"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, err := st.Task(ctx, "child")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("queue=%+v dirty=%d pull=%+v title=%q parent=%q", counts, dirty, result, child.Title, child.ParentId)
+	if child.Title != "Updated on server" {
+		t.Fatal("child remains dirty with empty queue; future server updates are ignored")
+	}
+}
+
+func parkLocalParent(t *testing.T, st *Store, parent model.Task) {
+	t.Helper()
+	ctx := context.Background()
+	claimed, _, err := st.Claim(ctx, 1, time.Minute)
+	if err != nil || len(claimed) != 1 || claimed[0].TaskID != parent.Id {
+		t.Fatalf("claim parent: %+v %v", claimed, err)
+	}
+	if err := st.MarkFailed(ctx, claimed[0].Seq, claimed[0].LeaseToken, "rejected"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDropParkedChildLinkPreservesOtherFields(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		edit model.TaskEdit
+	}{
+		{"estimates", model.TaskEdit{EstimatedPomo: model.Ptr(3), EstimatedDuration: model.Ptr(int64(120))}},
+		{"title", model.TaskEdit{Title: model.Ptr("Edited child")}},
+		{"repeat", model.TaskEdit{RepeatFlag: model.Ptr("RRULE:FREQ=DAILY;INTERVAL=1")}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			st, parent := localParentFixture(t)
+			edit := tc.edit
+			edit.ParentId = model.Ptr(parent.Id)
+			if _, err := st.UpdateTask(ctx, "child", edit); err != nil {
+				t.Fatal(err)
+			}
+			parkLocalParent(t, st, parent)
+			if _, err := st.DropParked(ctx); err != nil {
+				t.Fatal(err)
+			}
+			claimed, _, err := st.Claim(ctx, 1, time.Minute)
+			if err != nil || len(claimed) != 1 || claimed[0].TaskID != "child" {
+				t.Fatalf("retained operation: %+v %v", claimed, err)
+			}
+			got, metadata, err := DecodeTaskEditPayload(claimed[0].Payload)
+			want, _ := json.Marshal(tc.edit)
+			actual, _ := json.Marshal(got)
+			if err != nil || string(actual) != string(want) {
+				t.Fatalf("edit = %s, want %s (%v)", actual, want, err)
+			}
+			if metadata != nil && metadata.ExtensionBaseline != nil && metadata.ExtensionBaseline.ParentId != nil {
+				t.Fatal("retained baseline still names a parent")
+			}
+			send, present, post, err := st.PrepareFeatureSend(ctx, claimed[0])
+			if err != nil || present != (metadata != nil) || present && !post {
+				t.Fatalf("prepare retained operation: %+v %v %v %v", send, present, post, err)
+			}
+			var dirty int64
+			if err := st.DB().QueryRowContext(ctx, `SELECT dirty FROM tasks WHERE id = 'child'`).Scan(&dirty); err != nil {
+				t.Fatal(err)
+			}
+			if dirty != claimed[0].Rev || dirty == 0 {
+				t.Fatalf("dirty = %d, retained revision = %d", dirty, claimed[0].Rev)
+			}
+		})
+	}
+}
+
+func TestDropParkedChildLinkPreservesOtherRevisions(t *testing.T) {
+	for _, newer := range []bool{false, true} {
+		t.Run(map[bool]string{false: "older", true: "newer"}[newer], func(t *testing.T) {
+			ctx := context.Background()
+			st, parent := localParentFixture(t)
+			edits := []model.TaskEdit{{Title: model.Ptr("Edited child")}, {ParentId: model.Ptr(parent.Id)}}
+			if newer {
+				edits[0], edits[1] = edits[1], edits[0]
+			}
+			for _, edit := range edits {
+				if _, err := st.UpdateTask(ctx, "child", edit); err != nil {
+					t.Fatal(err)
+				}
+			}
+			parkLocalParent(t, st, parent)
+			if _, err := st.DropParked(ctx); err != nil {
+				t.Fatal(err)
+			}
+			incoming := fromServer(openTask("child", "p1", "Server title"))
+			if _, err := st.SyncProject(ctx, "p1", incoming); err != nil {
+				t.Fatal(err)
+			}
+			child, err := st.Task(ctx, "child")
+			if err != nil || child.Title != "Edited child" {
+				t.Fatalf("pending edit lost: %+v %v", child, err)
+			}
+			claimed, _, err := st.Claim(ctx, 1, time.Minute)
+			if err != nil || len(claimed) != 1 {
+				t.Fatalf("claim: %+v %v", claimed, err)
+			}
+			if err := st.Tx(ctx, func(tx *sql.Tx) error {
+				cleared, err := MarkPushedTx(ctx, tx, "child", claimed[0].Rev)
+				if err != nil {
+					return err
+				}
+				if !cleared {
+					return errors.New("retained revision cannot clear dirty")
+				}
+				return markDone(ctx, tx, claimed[0].Seq, claimed[0].LeaseToken)
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := st.SyncProject(ctx, "p1", incoming); err != nil {
+				t.Fatal(err)
+			}
+			child, err = st.Task(ctx, "child")
+			if err != nil || child.Title != "Server title" {
+				t.Fatalf("pull after confirmation: %+v %v", child, err)
+			}
+		})
+	}
+}
+
+func TestDropParkedRefusesFrozenMixedChildLinkAtomically(t *testing.T) {
+	for _, rejected := range []bool{false, true} {
+		t.Run(map[bool]string{false: "armed", true: "rejected"}[rejected], func(t *testing.T) {
+			ctx := context.Background()
+			st, parent := localParentFixture(t)
+			if _, err := st.UpdateTask(ctx, "child", model.TaskEdit{ParentId: model.Ptr(parent.Id), EstimatedPomo: model.Ptr(3)}); err != nil {
+				t.Fatal(err)
+			}
+			claimed, _, err := st.Claim(ctx, 2, time.Minute)
+			if err != nil || len(claimed) != 2 {
+				t.Fatalf("claim: %+v %v", claimed, err)
+			}
+			if err := st.Unclaim(ctx, claimed[0].Seq, claimed[0].LeaseToken, "waiting"); err != nil {
+				t.Fatal(err)
+			}
+			if _, _, _, err := st.PrepareFeatureSend(ctx, claimed[1]); err != nil {
+				t.Fatal(err)
+			}
+			if rejected {
+				if err := st.RejectFeature(ctx, claimed[1]); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := st.Unclaim(ctx, claimed[1].Seq, claimed[1].LeaseToken, "waiting"); err != nil {
+				t.Fatal(err)
+			}
+			parkLocalParent(t, st, parent)
+			var before string
+			if err := st.DB().QueryRowContext(ctx, `SELECT payload FROM outbox WHERE seq = ?`, claimed[1].Seq).Scan(&before); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := st.DropParked(ctx); err == nil || !strings.Contains(err.Error(), "frozen request") {
+				t.Fatalf("drop = %v, want an explicit refusal", err)
+			}
+			if _, err := st.Task(ctx, parent.Id); err != nil {
+				t.Fatalf("parent lost on refusal: %v", err)
+			}
+			var after string
+			if err := st.DB().QueryRowContext(ctx, `SELECT payload FROM outbox WHERE seq = ?`, claimed[1].Seq).Scan(&after); err != nil {
+				t.Fatal(err)
+			}
+			if before != after {
+				t.Fatal("frozen payload changed on refusal")
+			}
+			counts, err := st.OutboxCounts(ctx)
+			if err != nil || counts.Pending != 1 || counts.Failed != 1 {
+				t.Fatalf("queue changed: %+v %v", counts, err)
+			}
+		})
+	}
+}

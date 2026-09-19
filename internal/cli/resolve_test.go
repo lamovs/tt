@@ -839,7 +839,7 @@ func TestKnownLineCountsEveryNameItDoesNotShow(t *testing.T) {
 		names[i] = fmt.Sprintf("Work%d", i+1)
 	}
 
-	got := knownLine(shortlist(names))
+	got := knownLine(Shortlist(names))
 	if n := runeLen(got); n > Width {
 		t.Errorf("the shortlist is %d columns wide, want at most %d:\n%q", n, Width, got)
 	}
@@ -884,7 +884,7 @@ func TestKnownLineDoesNotHideANameOnALineThatStops(t *testing.T) {
 		t.Fatalf("the answer this pins is %d columns and not the %d it was written at, so the fixture no longer asks anything: %q",
 			runeLen(want), Width, want)
 	}
-	if got := knownLine(shortlist(all)); got != want {
+	if got := knownLine(Shortlist(all)); got != want {
 		t.Errorf("knownLine of an account of %d lists = %q (%d columns), want %q (%d columns) - the fourth name fitted",
 			len(all), got, runeLen(got), want, runeLen(want))
 	}

@@ -64,7 +64,7 @@ func (s *Store) OrphanedLocalTasks(ctx context.Context) ([]OrphanedLocalTask, er
 	return out, nil
 }
 
-func dropOrphanedLocalTask(ctx context.Context, q execer, id string) (bool, error) {
+func dropOrphanedLocalTask(ctx context.Context, q *sql.Tx, id string) (bool, error) {
 	if !IsLocalID(id) {
 		return false, nil
 	}
@@ -83,7 +83,119 @@ func dropOrphanedLocalTask(ctx context.Context, q execer, id string) (bool, erro
 	if _, err := q.ExecContext(ctx, `DELETE FROM outbox WHERE task_id = ?`, id); err != nil {
 		return false, fmt.Errorf("drop orphaned local task %s: %w", id, err)
 	}
+	if err := dropQueuedChildLinks(ctx, q, id); err != nil {
+		return false, err
+	}
+	// A child of the dropped task keeps pointing at an id nothing holds any
+	// more, and tt prints that id back to the reader. The next pull corrects
+	// the rows it returns, so these two statements only keep a local id out
+	// of the cache until then.
+	for _, step := range []idSwapStep{
+		{"tasks parent", `UPDATE tasks SET parent_id = '' WHERE parent_id = ?`, []any{id}},
+		{"tasks children", `UPDATE tasks SET child_ids = (
+			SELECT json_group_array(value) FROM json_each(child_ids) WHERE value <> ?)
+			WHERE json_valid(child_ids) AND instr(child_ids, ?) > 0`, []any{id, id}},
+	} {
+		if _, err := q.ExecContext(ctx, step.query, step.args...); err != nil {
+			return false, fmt.Errorf("drop orphaned local task %s from %s: %w", id, step.what, err)
+		}
+	}
 	return true, nil
+}
+
+// dropQueuedChildLinks throws away the unsent relationships that hang a task
+// under a dropped one. Such an entry belongs to the child, so its task_id is
+// the id of the child and the delete of the entries of the dropped task
+// leaves it behind; the next push then parks it over a parent the cache no
+// longer holds, and a second tt sync --drop-parked is what it takes to be rid
+// of it. Candidates are narrowed by the mention of the id, which is wider
+// than the rule - the payload of the child names its own task too - and each
+// one is decided by taskExtensionParent, the way validateTaskClosure decides
+// them. An inflight entry is left where it is: it may be on the server
+// already and only the push can settle it.
+//
+// Other fields of a prepared update stay queued. Frozen mixed updates cannot
+// be rewritten safely, so they refuse the drop. Creates stay for the push to
+// park, since dropping a relationship must not discard the child itself.
+func dropQueuedChildLinks(ctx context.Context, q *sql.Tx, id string) error {
+	rows, err := q.QueryContext(ctx, childLinkCandidateSQL+` AND op <> ? AND state <> ? AND instr(payload, ?) > 0 ORDER BY seq`,
+		OpTaskCreate, string(OutboxInflight), id)
+	if err != nil {
+		return fmt.Errorf("drop the children queued under %s: %w", id, err)
+	}
+	links, err := scanChildLinks(rows)
+	if err != nil {
+		return fmt.Errorf("drop the children queued under %s: %w", id, err)
+	}
+	for _, link := range links {
+		if link.parent != id {
+			continue
+		}
+		var payload []byte
+		var rev int64
+		if err := q.QueryRowContext(ctx, `SELECT payload, coalesce(rev, 0) FROM outbox WHERE seq = ?`, link.seq).Scan(&payload, &rev); err != nil {
+			return err
+		}
+		edit, metadata, err := DecodeTaskEditPayload(payload)
+		if err != nil {
+			return err
+		}
+		edit.ParentId = nil
+		if edit.IsEmpty() {
+			if _, err := q.ExecContext(ctx, `DELETE FROM outbox WHERE seq = ?`, link.seq); err != nil {
+				return fmt.Errorf("drop the child queued under %s: %w", id, err)
+			}
+			if err := reconcileDroppedChildRevision(ctx, q, link.child, rev); err != nil {
+				return err
+			}
+		} else {
+			if metadata.Phase != FeaturePrepared {
+				return fmt.Errorf("cannot drop parent %s: child operation %d has other fields in a frozen request; recover that operation first", id, link.seq)
+			}
+			metadata.ExtensionBaseline.ParentId = nil
+			metadata.Fields.Extensions = hasTaskExtensions(edit)
+			if !metadata.Fields.Extensions {
+				metadata.ExtensionBaseline = nil
+			}
+			metadata.Version = newFeaturePayloadVersion(metadata.Fields)
+			if metadata.Fields.empty() {
+				payload, err = json.Marshal(edit)
+			} else {
+				payload, err = EncodeTaskEditPayload(edit, *metadata)
+			}
+			if err != nil {
+				return err
+			}
+			if _, err := q.ExecContext(ctx, `UPDATE outbox SET payload = ? WHERE seq = ?`, payload, link.seq); err != nil {
+				return err
+			}
+		}
+		if err := bumpItemIdentityEpoch(ctx, q); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func reconcileDroppedChildRevision(ctx context.Context, q execer, id string, rev int64) error {
+	if rev == 0 {
+		return nil
+	}
+	var remaining, unversioned int
+	var latest int64
+	if err := q.QueryRowContext(ctx, `SELECT count(*), count(*) - count(rev), coalesce(max(rev), 0)
+		FROM outbox WHERE task_id = ?`, id).Scan(&remaining, &unversioned, &latest); err != nil {
+		return err
+	}
+	if remaining == 0 {
+		_, err := clearDirtyAt(ctx, q, id, rev)
+		return err
+	}
+	if unversioned != 0 || latest == 0 {
+		return nil
+	}
+	_, err := q.ExecContext(ctx, `UPDATE tasks SET dirty = ? WHERE id = ? AND dirty = ?`, latest, id, rev)
+	return err
 }
 
 func (s *Store) ReplaceLocalID(ctx context.Context, localID, serverID string) error {
@@ -142,6 +254,19 @@ func replaceLocalID(ctx context.Context, q execer, localID, serverID string) err
 		}
 	}
 	steps := append(head, []idSwapStep{
+
+		// A child may name a parent that is still waiting for this very
+		// create, so the rows pointing at the old id are rewritten in both
+		// branches: the local row is gone in a merge, the references to it
+		// are not.
+		{"tasks parent", `UPDATE tasks SET parent_id = ? WHERE parent_id = ?`, []any{serverID, localID}},
+		// child_ids is written by the pull alone, and what the server
+		// returns never holds a local id, so this step corrects nothing
+		// today. It is kept as a guard: a future writer of child_ids would
+		// otherwise leave a swapped id behind without a word.
+		{"tasks children", `UPDATE tasks SET child_ids = replace(child_ids, ?, ?) WHERE instr(child_ids, ?) > 0`,
+			[]any{localID, serverID, localID}},
+
 		{"outbox", `UPDATE outbox SET task_id = ? WHERE task_id = ?`, []any{serverID, localID}},
 		{"listing", `UPDATE listing SET task_id = ? WHERE task_id = ?`, []any{serverID, localID}},
 		{"focus_sessions", `UPDATE focus_sessions SET task_id = ? WHERE task_id = ?`, []any{serverID, localID}},

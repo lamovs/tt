@@ -258,7 +258,7 @@ func (m browserModel) finishAction(msg actionFinished) (browserModel, tea.Cmd) {
 		m.notice = fmt.Sprintf("Saved locally (%s). Remote confirmation requires sync.", msg.kind)
 	}
 	if msg.kind == "create" {
-		m.notice += " Created: " + msg.outcome.Task.Title + " [" + msg.outcome.Task.Id + "]."
+		m.notice += " Created: " + markTitle(msg.outcome.Task.Title) + " [" + msg.outcome.Task.Id + "]."
 
 	}
 	if msg.kind == "undo" {
@@ -267,7 +267,7 @@ func (m browserModel) finishAction(msg actionFinished) (browserModel, tea.Cmd) {
 		} else if msg.undo.Entry.Action.EntityRef != nil {
 			m.notice = "Canceled the unsent resource operation from global history. No remote request was made."
 		} else {
-			m.notice += " Global history applied to " + msg.outcome.Task.Title + "."
+			m.notice += " Global history applied to " + markTitle(msg.outcome.Task.Title) + "."
 		}
 	}
 	if quit {

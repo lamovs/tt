@@ -94,22 +94,22 @@ func (m browserModel) View() tea.View {
 	lines := []string{m.accent.Render(header)}
 	status := "Local cache | Auto refresh 2s"
 	if m.notice != "" {
-		status = displayClipped(m.notice, max(1, m.width))
+		status = displayClipped(m.revealTitles(m.notice), max(1, m.width))
 	}
 	if m.loading {
 		status = "Loading cache..."
 	}
 	if m.query.Search != "" {
-		status = "Search: " + displayClipped(m.query.Search, max(1, m.width))
+		status = "Search: " + displayClipped(m.conceal(m.query.Search, hiddenTitle), max(1, m.width))
 	}
 	if m.selectionNotice != "" {
 		status = m.selectionNotice
 	}
 	if m.searching {
-		status = "Search: " + m.input.view(max(1, m.width-8))
+		status = "Search: " + m.searchView(max(1, m.width-8))
 	}
 	if m.actions != nil && m.notice != "" && !m.searching {
-		status = displayClipped(m.notice, max(1, m.width))
+		status = displayClipped(m.revealTitles(m.notice), max(1, m.width))
 	}
 	if m.form != nil && m.form.err != "" {
 		status = "Not saved: " + displayClipped(m.form.err, max(1, m.width))
@@ -135,7 +135,7 @@ func (m browserModel) View() tea.View {
 	if m.resource != nil {
 		status = "Local resources | R explicitly refreshes from TickTick"
 		if m.notice != "" {
-			status = displayClipped(m.notice, max(1, m.width))
+			status = displayClipped(m.revealTitles(m.notice), max(1, m.width))
 		}
 		if m.resource.err != "" {
 			status = displayClipped(m.resource.err, max(1, m.width))
@@ -317,7 +317,8 @@ func (m browserModel) paneContent(p pane, width, rows int) (string, []string) {
 			if ansi.StringWidth(suffix) > width/2 {
 				suffix = ansi.Truncate(suffix, width/2, "...")
 			}
-			text := fit(prefix+displayClipped(t.Title, max(0, width-len(prefix)-ansi.StringWidth(suffix))), max(0, width-ansi.StringWidth(suffix))) + suffix
+			title := m.conceal(t.Title, hiddenTitle)
+			text := fit(prefix+displayClipped(title, max(0, width-len(prefix)-ansi.StringWidth(suffix))), max(0, width-ansi.StringWidth(suffix))) + suffix
 			if t.Id == m.taskID && m.focus == tasksPane {
 				text = m.accent.Render(text)
 			}
@@ -325,6 +326,9 @@ func (m browserModel) paneContent(p pane, width, rows int) (string, []string) {
 		}
 		return title, lines
 	default:
+		if hidden := m.conceal("", hiddenPreview); hidden != "" {
+			return "Preview", wrapText(hidden, width)
+		}
 		if m.selectionNotice != "" {
 			return "Preview", wrapText(m.selectionNotice, width)
 		}
@@ -602,6 +606,9 @@ func (m browserModel) helpLines() []string {
 	}
 	lines := []string{
 		"Global keys", ": opens project/folder/tag/habit/countdown/comment/queue/focus workspaces", "b: toggle Kanban for the selected project; C manages its columns", "1/2/3: select Lists, Tasks or Preview directly", "Ctrl+O: show panel hints; Esc or Ctrl+O cancels them",
+		"Ctrl+K: private mode hides task titles, Kanban cards and details",
+		"Private mode also hides the search filter; forms keep their own draft",
+		"Ctrl+K answers in every context; the mode is never kept between runs",
 		"Tab/l/right: next panel", "Shift+Tab/h/left: previous panel",
 		"+: next size (normal -> half -> full)", "_: previous size; Esc restores normal size",
 		"/: search this view; Enter applies, Esc cancels", "Empty search removes the search filter",

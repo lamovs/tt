@@ -143,6 +143,7 @@ type browserModel struct {
 	focus                            pane
 	mode                             screenMode
 	jump, loading, searching         bool
+	private                          bool
 	input                            searchInput
 	interrupted                      bool
 	err                              error
@@ -169,7 +170,8 @@ func newModel(ctx context.Context, queries Queries, opts Options) browserModel {
 		generation: 1, loadContext: loadCtx, cancelLoad: cancel,
 		selections: make(map[app.BrowseQuery]string),
 		loading:    opts.Err == nil, err: opts.Err, notice: opts.Notice,
-		width: 80, height: 24, keys: newKeyMap(), accent: accent, muted: muted,
+		private: opts.Private,
+		width:   80, height: 24, keys: newKeyMap(), accent: accent, muted: muted,
 	}
 }
 
@@ -558,6 +560,10 @@ func (m browserModel) handleKey(msg tea.KeyPressMsg) (browserModel, tea.Cmd) {
 		m.interrupted = true
 		return m, tea.Quit
 	}
+	if key.Matches(msg, m.keys.private) {
+		m.private = !m.private
+		return m, nil
+	}
 	if s == "f1" {
 		m.help.ShowAll = !m.help.ShowAll
 		m.help.offset = 0
@@ -800,7 +806,7 @@ func (m browserModel) taskIndex() int {
 
 type keyMap struct {
 	up, down, nextPane, previousPane, open, back, jump, help, quit, interrupt key.Binding
-	search, refresh, nextSize, prevSize                                       key.Binding
+	search, refresh, nextSize, prevSize, private                              key.Binding
 }
 
 func newKeyMap() keyMap {
@@ -813,5 +819,6 @@ func newKeyMap() keyMap {
 		quit: key.NewBinding(key.WithKeys("q")), interrupt: key.NewBinding(key.WithKeys("ctrl+c")),
 		search: key.NewBinding(key.WithKeys("/")), refresh: key.NewBinding(key.WithKeys("r")),
 		nextSize: key.NewBinding(key.WithKeys("+")), prevSize: key.NewBinding(key.WithKeys("_")),
+		private: key.NewBinding(key.WithKeys("ctrl+k")),
 	}
 }

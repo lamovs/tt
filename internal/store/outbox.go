@@ -294,7 +294,7 @@ func markDone(ctx context.Context, q execer, seq int64, token LeaseToken) error 
 	return affectedOne(ctx, q, res, seq)
 }
 
-func discardQueued(ctx context.Context, q execer, cond string, args ...any) (int64, []string, error) {
+func discardQueued(ctx context.Context, q *sql.Tx, cond string, args ...any) (int64, []string, error) {
 	rows, err := q.QueryContext(ctx,
 		`DELETE FROM outbox WHERE `+cond+` RETURNING task_id, op`, args...)
 	if err != nil {

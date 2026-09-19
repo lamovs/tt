@@ -34,6 +34,8 @@ func init() {
 			}},
 			{Title: "Additional fields", Items: []string{
 				"--parent TASK|none, --estimated-duration, --estimated-pomo 0..60 and --sort-order INT64 use exact preview and accept steps.",
+				"--parent takes an open parent of the same list, and one whose own creation is still queued counts: tt add A, tt add B and tt edit B --parent A need no tt sync in between. Any other queued change of the parent chain is refused.",
+				"A link to a parent whose creation does not go through is parked and returns to the queue with tt sync --retry-failed; the child stays a task of its own until it is sent.",
 				"Durations use whole-second Go duration syntax. Sort order has a separate preview from the other extension fields.",
 			}},
 			{Title: "Kanban", Items: []string{

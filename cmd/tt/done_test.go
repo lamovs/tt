@@ -375,3 +375,42 @@ func TestDoneClosesNoMoreTasksOnceTheSignalLands(t *testing.T) {
 		t.Error("the batch closed a task after the user stopped the run")
 	}
 }
+
+// tt done is one of the four ways a task is closed, and the refusal the
+// store words for a child relationship that has not been sent yet reaches
+// the reader whole, with the sync it asks for.
+func TestDoneRefusesAParentWhoseChildLinkIsUnsent(t *testing.T) {
+	isolate(t)
+	ctx := context.Background()
+	ids := seedDone(t, doneProjects,
+		model.Task{Title: "trip", ProjectId: "p1"},
+		model.Task{Title: "book tickets", ProjectId: "p1"},
+	)
+	setDoneListing(t, ids)
+
+	st := openDoneStore(t)
+	if _, err := st.UpdateTask(ctx, ids[1], model.TaskEdit{ParentId: model.Ptr(ids[0])}); err != nil {
+		t.Fatalf("hang the child under the queued parent: %v", err)
+	}
+	st.Close()
+
+	var stdout, stderr bytes.Buffer
+	if got := run(ctx, []string{"done", "1"}, strings.NewReader(""), &stdout, &stderr); got != exitError {
+		t.Fatalf("run(done 1) = %d, want %d (stderr: %s)", got, exitError, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "run tt sync first") {
+		t.Errorf("stderr = %q, want it to send the reader to tt sync", stderr.String())
+	}
+	if task := readDoneTask(t, ids[0]); task.Status.Done() {
+		t.Errorf("parent %s was closed while the relationship of its child was still queued", ids[0])
+	}
+	// The child hangs nothing under itself, so closing it is untouched.
+	stdout.Reset()
+	stderr.Reset()
+	if got := run(ctx, []string{"done", "2"}, strings.NewReader(""), &stdout, &stderr); got != exitOK {
+		t.Fatalf("run(done 2) = %d, want %d (stderr: %s)", got, exitOK, stderr.String())
+	}
+	if task := readDoneTask(t, ids[1]); !task.Status.Done() {
+		t.Errorf("child %s = %+v, want tt done to close it", ids[1], task)
+	}
+}

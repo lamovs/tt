@@ -234,12 +234,12 @@ func (r Resolver) Project(ctx context.Context, query string) (model.Project, err
 		if err != nil {
 			return model.Project{}, err
 		}
-		known, omitted := shortlist(projectNames(all))
+		known, omitted := Shortlist(projectNames(all))
 		return model.Project{}, &NoMatchError{What: "list", Query: query, Known: known, Omitted: omitted}
 	case 1:
 		return matches[0], nil
 	default:
-		named, omitted := shortlist(projectNames(matches))
+		named, omitted := Shortlist(projectNames(matches))
 		return model.Project{}, &AmbiguousError{
 			What: "list", Query: query, Choices: projectChoices(named), Omitted: omitted,
 		}
@@ -440,7 +440,9 @@ const namesInAnError = 12
 
 const nameInAnError = maxProject
 
-func shortlist(names []string) ([]string, int) {
+// Shortlist cuts names down to the number one error may name, and reports how
+// many it left out.
+func Shortlist(names []string) ([]string, int) {
 	if len(names) <= namesInAnError {
 		return names, 0
 	}

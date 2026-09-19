@@ -24,6 +24,7 @@ type Options struct {
 	Notice         string
 	Err            error
 	Color          bool
+	Private        bool
 }
 
 func Run(ctx context.Context, input, output *os.File, queries Queries, opts Options) (err error) {

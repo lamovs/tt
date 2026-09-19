@@ -21,6 +21,8 @@ func TestUIDispatchAndNonTerminalRefusalDoNotOpenCache(t *testing.T) {
 		{[]string{"ui"}, exitError, "interactive terminal on stdin and stdout"},
 		{[]string{"ui", "extra"}, exitUsage, "takes no arguments"},
 		{[]string{"ui", "--sync"}, exitUsage, "unknown option"},
+		{[]string{"ui", "--private"}, exitError, "interactive terminal"},
+		{[]string{"ui", "--private", "--sync"}, exitUsage, "unknown option"},
 		{[]string{"ui", "--help"}, exitOK, "tt ui - "},
 		{[]string{"help", "ui"}, exitOK, "tt ui - "},
 		{[]string{"ui", "--help", "--color"}, exitOK, "tt ui - "},
@@ -41,6 +43,40 @@ func TestUIDispatchAndNonTerminalRefusalDoNotOpenCache(t *testing.T) {
 				t.Fatalf("dispatch touched the cache: %v", err)
 			}
 		})
+	}
+}
+
+func TestUIPrivateModeIsOffUnlessTheFlagAsksForIt(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		args       []string
+		private    bool
+		unknown    string
+		understood bool
+	}{
+		{"no options", nil, false, "", true},
+		{"private", []string{"--private"}, true, "", true},
+		{"private repeated", []string{"--private", "--private"}, true, "", true},
+		{"unknown alone", []string{"--sync"}, false, "--sync", false},
+		{"unknown after private", []string{"--private", "--quiet"}, false, "--quiet", false},
+		{"stray word", []string{"--private", ""}, false, "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			private, unknown, understood := uiRefinements(tc.args)
+			if private != tc.private || unknown != tc.unknown || understood != tc.understood {
+				t.Fatalf("uiRefinements(%q) = %v, %q, %v; want %v, %q, %v",
+					tc.args, private, unknown, understood, tc.private, tc.unknown, tc.understood)
+			}
+		})
+	}
+}
+
+func TestUIHelpDescribesPrivateMode(t *testing.T) {
+	help := strings.Join(commands["ui"].help.Render(cli.PlainPalette()), "\n")
+	for _, want := range []string{"--private", "Ctrl+K"} {
+		if !strings.Contains(help, want) {
+			t.Fatalf("tt ui help never mentions %q:\n%s", want, help)
+		}
 	}
 }
 

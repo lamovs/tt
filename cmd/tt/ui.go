@@ -16,6 +16,7 @@ func init() {
 			Verb: "ui", Summary: "interactive task workspace with context help, timers and settings",
 			Examples: []cli.Example{
 				{Cmd: "tt ui", What: "open the interactive task workspace"},
+				{Cmd: "tt ui --private", What: "open with task titles and details already hidden"},
 				{Cmd: "EDITOR=nvim tt ui", What: "use Neovim when VISUAL is unset"},
 			},
 			Sections: []cli.HelpSection{
@@ -25,6 +26,11 @@ func init() {
 					"Press 1, 2 or 3 for Lists, Tasks or Preview. Ctrl+O shows those panel hints.",
 					"Press ? for help outside text input or F1 for context help anywhere. F1 or Esc closes help without changing a draft or confirmation.",
 					"Today includes overdue tasks. CLI changes refresh automatically; returning terminal focus requests one local refresh.",
+				}},
+				{Title: "Private mode", Items: []string{
+					"--private hides task titles and the details panel from the first frame, for browsing lists on a shared screen.",
+					"Ctrl+K turns it on and off in every context, including forms. List names, counters, dates and priorities stay visible.",
+					"The mode is off unless --private is given and is never remembered between runs.",
 				}},
 				{Title: "Tasks and forms", Items: []string{
 					"a creates a TEXT task, n creates a NOTE, e edits the selected record, d opens dates/repeat/reminders, Space completes or reopens, u opens undo and s synchronizes.",
@@ -91,8 +97,9 @@ func init() {
 }
 
 func cmdUI(inv *invocation) int {
-	if len(inv.refinements) > 0 {
-		return inv.misuseWord("unknown option ", inv.refinements[0])
+	private, unknown, known := uiRefinements(inv.refinements)
+	if !known {
+		return inv.misuseWord("unknown option ", unknown)
 	}
 	if len(inv.data) > 0 {
 		return inv.misuse("tt ui takes no arguments")
@@ -105,7 +112,7 @@ func cmdUI(inv *invocation) int {
 	}
 	system := &uiSystem{output: inv.stdout, color: inv.color, colorOverride: inv.colorKnown}
 	defer system.close()
-	opts := tui.Options{Color: inv.outPalette().Enabled(), System: system}
+	opts := tui.Options{Color: inv.outPalette().Enabled(), System: system, Private: private}
 	cfg, cfgErr := inv.config()
 	opts.Err, opts.DefaultProject = cfgErr, cfg.DefaultProject
 	var queries tui.Queries
@@ -135,6 +142,18 @@ func cmdUI(inv *invocation) int {
 		return inv.uiFailure(err)
 	}
 	return exitOK
+}
+
+// uiRefinements reads the options of tt ui. Private mode has to be known
+// before the first frame is painted, so it can only arrive as a flag.
+func uiRefinements(refinements []string) (private bool, unknown string, known bool) {
+	for _, flag := range refinements {
+		if flag != "--private" {
+			return false, flag, false
+		}
+		private = true
+	}
+	return private, "", true
 }
 
 func (inv *invocation) uiFailure(err error) int {
