@@ -2377,6 +2377,50 @@ func TestCheckCacheShowsOrphanedLocalRows(t *testing.T) {
 	}
 }
 
+func TestCheckCacheReportsUncachedParentsWithoutWriting(t *testing.T) {
+	isolate(t)
+	ctx := context.Background()
+	seedProjects(t, model.Project{Id: "p1", Name: "Work"})
+	st, err := store.Open(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const child = "child\nrow"
+	const parent = "parent\x1b[31m"
+	if _, err := st.DB().ExecContext(ctx, `INSERT INTO tasks(id, project_id, parent_id) VALUES (?, 'p1', ?)`, child, parent); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Enqueue(ctx, store.OutboxEntry{Target: store.TargetOpenAPI, Op: store.OpTaskCreate, TaskID: "queued-child", ProjectID: "p1", Payload: []byte(`{"parent_id":"queue-parent"}`)}); err != nil {
+		t.Fatal(err)
+	}
+	st.Close()
+	path, err := store.DefaultPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, _ := checkCache(ctx)
+	if result.status != statusWarn {
+		t.Fatalf("status=%v notes=%v", result.status, result.notes)
+	}
+	text := noteText(result)
+	for _, want := range []string{"2 task parent reference(s)", "queued change", strconv.Quote(child), strconv.Quote(parent), "without repairing them"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("missing %q in %s", want, text)
+		}
+	}
+	if strings.Contains(text, child) || strings.Contains(text, parent) {
+		t.Fatal("raw control characters in report")
+	}
+	after, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatal("read-only inspection changed the cache")
+	}
+}
+
 func TestCheckCacheSaysNothingAboutOrphansInAHealthyCache(t *testing.T) {
 	isolate(t)
 	ctx := context.Background()
@@ -3543,6 +3587,8 @@ func TestEachReadStandsBehindTheVoiceThatAnsweredIt(t *testing.T) {
 		"the task-to-project references": {"cacheStoreLead",
 			"UncachedTaskProjects wraps both query and row-stream failures in the store's own " +
 				"uncached-project category"},
+		"the task-to-parent references": {"cacheStoreLead",
+			"UncachedTaskParents wraps query and row-stream failures in its own uncached-parent category"},
 		"the item-to-task references": {"cacheStoreLead",
 			"DanglingItemTasks wraps both query and row-stream failures in the store's own " +
 				"dangling-item category"},

@@ -103,70 +103,43 @@ func dropOrphanedLocalTask(ctx context.Context, q *sql.Tx, id string) (bool, err
 	return true, nil
 }
 
-// dropQueuedChildLinks throws away the unsent relationships that hang a task
-// under a dropped one. Such an entry belongs to the child, so its task_id is
-// the id of the child and the delete of the entries of the dropped task
-// leaves it behind; the next push then parks it over a parent the cache no
-// longer holds, and a second tt sync --drop-parked is what it takes to be rid
-// of it. Candidates are narrowed by the mention of the id, which is wider
-// than the rule - the payload of the child names its own task too - and each
-// one is decided by taskExtensionParent, the way validateTaskClosure decides
-// them. An inflight entry is left where it is: it may be on the server
-// already and only the push can settle it.
-//
-// Other fields of a prepared update stay queued. Frozen mixed updates cannot
-// be rewritten safely, so they refuse the drop. Creates stay for the push to
-// park, since dropping a relationship must not discard the child itself.
 func dropQueuedChildLinks(ctx context.Context, q *sql.Tx, id string) error {
-	rows, err := q.QueryContext(ctx, childLinkCandidateSQL+` AND op <> ? AND state <> ? AND instr(payload, ?) > 0 ORDER BY seq`,
-		OpTaskCreate, string(OutboxInflight), id)
+	rows, err := q.QueryContext(ctx, `SELECT `+outboxColumns+` FROM outbox WHERE `+childLinkPredicateSQL+` AND instr(payload, ?) > 0 ORDER BY seq`, id)
 	if err != nil {
-		return fmt.Errorf("drop the children queued under %s: %w", id, err)
+		return fmt.Errorf("read the children queued under %s: %w", id, err)
 	}
-	links, err := scanChildLinks(rows)
-	if err != nil {
-		return fmt.Errorf("drop the children queued under %s: %w", id, err)
-	}
-	for _, link := range links {
-		if link.parent != id {
-			continue
-		}
-		var payload []byte
-		var rev int64
-		if err := q.QueryRowContext(ctx, `SELECT payload, coalesce(rev, 0) FROM outbox WHERE seq = ?`, link.seq).Scan(&payload, &rev); err != nil {
+	var items []OutboxItem
+	for rows.Next() {
+		item, err := scanOutbox(rows)
+		if err != nil {
+			rows.Close()
 			return err
 		}
-		edit, metadata, err := DecodeTaskEditPayload(payload)
+		items = append(items, item)
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return err
+	}
+	previousParents := make(map[string]string)
+	for _, item := range items {
+		payload, changed, err := removeDroppedParent(item, id, previousParents)
 		if err != nil {
 			return err
 		}
-		edit.ParentId = nil
-		if edit.IsEmpty() {
-			if _, err := q.ExecContext(ctx, `DELETE FROM outbox WHERE seq = ?`, link.seq); err != nil {
-				return fmt.Errorf("drop the child queued under %s: %w", id, err)
+		if !changed {
+			continue
+		}
+		if payload == nil {
+			if _, err := q.ExecContext(ctx, `DELETE FROM outbox WHERE seq = ?`, item.Seq); err != nil {
+				return err
 			}
-			if err := reconcileDroppedChildRevision(ctx, q, link.child, rev); err != nil {
+			if err := reconcileDroppedChildRevision(ctx, q, item.TaskID, item.Rev); err != nil {
 				return err
 			}
 		} else {
-			if metadata.Phase != FeaturePrepared {
-				return fmt.Errorf("cannot drop parent %s: child operation %d has other fields in a frozen request; recover that operation first", id, link.seq)
-			}
-			metadata.ExtensionBaseline.ParentId = nil
-			metadata.Fields.Extensions = hasTaskExtensions(edit)
-			if !metadata.Fields.Extensions {
-				metadata.ExtensionBaseline = nil
-			}
-			metadata.Version = newFeaturePayloadVersion(metadata.Fields)
-			if metadata.Fields.empty() {
-				payload, err = json.Marshal(edit)
-			} else {
-				payload, err = EncodeTaskEditPayload(edit, *metadata)
-			}
-			if err != nil {
-				return err
-			}
-			if _, err := q.ExecContext(ctx, `UPDATE outbox SET payload = ? WHERE seq = ?`, payload, link.seq); err != nil {
+			if _, err := q.ExecContext(ctx, `UPDATE outbox SET payload = ? WHERE seq = ?`, payload, item.Seq); err != nil {
 				return err
 			}
 		}
@@ -174,7 +147,84 @@ func dropQueuedChildLinks(ctx context.Context, q *sql.Tx, id string) error {
 			return err
 		}
 	}
+	for child, previous := range previousParents {
+		if _, err := q.ExecContext(ctx, `UPDATE tasks SET parent_id = ? WHERE id = ? AND parent_id = ?`, previous, child, id); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+func removeDroppedParent(item OutboxItem, parent string, previousParents map[string]string) ([]byte, bool, error) {
+	var task model.Task
+	var edit model.TaskEdit
+	var metadata *FeaturePayloadMetadata
+	var err error
+	if item.Op == OpTaskCreate {
+		task, metadata, err = DecodeTaskPayload(item.Payload)
+	} else {
+		edit, metadata, err = DecodeTaskEditPayload(item.Payload)
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	if metadata == nil {
+		return nil, false, nil
+	}
+	pointsAt := func(id *string) bool { return id != nil && *id == parent }
+	root := task.ParentId == parent || pointsAt(edit.ParentId)
+	baseline := metadata.ExtensionBaseline != nil && pointsAt(metadata.ExtensionBaseline.ParentId)
+	if !root && !baseline {
+		return nil, false, nil
+	}
+	if item.State == OutboxInflight || metadata.Phase != FeaturePrepared {
+		return nil, false, fmt.Errorf("cannot drop parent %s: child operation %d has a frozen request or is in flight; recover that operation first", parent, item.Seq)
+	}
+	if item.State != OutboxPending && item.State != OutboxFailed {
+		return nil, false, fmt.Errorf("cannot drop parent %s: child operation %d has an unknown queue state", parent, item.Seq)
+	}
+	var payload []byte
+	if item.Op == OpTaskCreate {
+		previousParents[item.TaskID] = ""
+		task.ParentId = ""
+		metadata.Fields.Extensions = hasTaskExtensions(extensionEditOfTask(task))
+		metadata.Version = newFeaturePayloadVersion(metadata.Fields)
+		if metadata.Fields.empty() {
+			payload, err = json.Marshal(task)
+		} else {
+			payload, err = EncodeTaskPayload(task, *metadata)
+		}
+	} else {
+		previous := *metadata.ExtensionBaseline.ParentId
+		if previous == parent {
+			var known bool
+			previous, known = previousParents[item.TaskID]
+			if !known {
+				return nil, false, fmt.Errorf("cannot drop parent %s: the earlier parent of child operation %d is unknown", parent, item.Seq)
+			}
+		}
+		if root {
+			previousParents[item.TaskID] = previous
+			edit.ParentId = nil
+			metadata.ExtensionBaseline.ParentId = nil
+		} else {
+			metadata.ExtensionBaseline.ParentId = model.Ptr(previous)
+		}
+		if edit.IsEmpty() {
+			return nil, true, nil
+		}
+		metadata.Fields.Extensions = hasTaskExtensions(edit)
+		if !metadata.Fields.Extensions {
+			metadata.ExtensionBaseline = nil
+		}
+		metadata.Version = newFeaturePayloadVersion(metadata.Fields)
+		if metadata.Fields.empty() {
+			payload, err = json.Marshal(edit)
+		} else {
+			payload, err = EncodeTaskEditPayload(edit, *metadata)
+		}
+	}
+	return payload, true, err
 }
 
 func reconcileDroppedChildRevision(ctx context.Context, q execer, id string, rev int64) error {

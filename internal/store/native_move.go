@@ -57,6 +57,9 @@ func nativeMovePreview(ctx context.Context, tx *sql.Tx, id, destination string) 
 	if preview.Task.ProjectId == destination {
 		return preview, errors.New("task already belongs to the destination project")
 	}
+	if err := validateTaskMoveChildren(ctx, tx, id); err != nil {
+		return preview, err
+	}
 	if preview.Task.ParentId != "" || len(preview.Task.ChildIds) != 0 {
 		return preview, errors.New("native move of a parent or child task requires verified relationship semantics")
 	}

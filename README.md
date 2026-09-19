@@ -226,11 +226,13 @@ Private mode:
   including inside forms
 - private mode is off by default and does not persist between runs
 - hidden: task titles in the task panel, Kanban cards, and the details
-  panel; list names, counts, dates, and priorities stay visible
+  panel, plus task titles in status notices and the Editor result panel;
+  list names, counts, dates, and priorities stay visible
 - the `/` filter inside the task panel is hidden too, since it filters the
   same task rows
-- not hidden: edit and checklist forms, the queue workspace, the Focus
-  workspace, the delete and move previews, and the server query workspace
+- not hidden: editing forms, checklist views, confirmation dialogs (including
+  completion, undo, deletion and moves), the queue workspace, the Focus
+  workspace, and the server query workspace
 
 Forms save locally with `Ctrl+S`. Destructive and remote-sensitive actions show
 a preview and require confirmation. If data changes concurrently, `tt` refuses
@@ -495,8 +497,11 @@ a local ID is parked rather than sent, and `tt sync --retry-failed` returns it
 to the queue once the creation of the parent has been confirmed. The child
 remains a top-level task until that link goes out. The rule holds from the
 other end as well: a parent cannot be completed while the link that hangs a
-child under it is still queued, whatever phase that link is in, and `tt sync`
-is what clears the refusal. Any other queued change on the parent chain is
+child under it is still queued, whatever phase that link is in. Deleting or
+moving any ancestor is refused for the same reason, with the child named in
+the refusal. Resolve the queued links before trying again. Moves also refuse
+cached children even when the parent's child list is incomplete.
+Any other queued change on the parent chain is
 still refused. `columnId`, child IDs, sort order and
 unknown server fields survive caching. To assign an existing confirmed column:
 
@@ -824,6 +829,16 @@ tt config default-project
 tt config default-focus
 tt doctor
 ```
+
+`tt doctor` reports missing parent references in cached tasks and queued
+creates or updates. It does not repair them. A parent absent from a partial
+local cache is not proof that it is missing on the server.
+
+When `tt sync --drop-parked` removes a failed local parent, prepared child
+creations stay queued as independent tasks. Other fields and later prepared
+relationship changes are preserved. If a dependent request is already in
+flight or has a frozen payload, cleanup is refused without changing the queue;
+recover that request first.
 
 Default paths are:
 

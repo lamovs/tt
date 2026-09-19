@@ -9,6 +9,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/movsar/tt/internal/app"
+	"github.com/movsar/tt/internal/cli"
 )
 
 func display(s string) string {
@@ -657,7 +658,9 @@ func (m browserModel) helpLines() []string {
 		"No background HTTP. Local edits do not automatically sync.")
 	var wrapped []string
 	for _, line := range lines {
-		wrapped = append(wrapped, wrapText(line, max(1, m.width-4))...)
+		for _, paragraph := range cli.Wrap(line, max(1, m.width-4)) {
+			wrapped = append(wrapped, wrapText(paragraph, max(1, m.width-4))...)
+		}
 	}
 	return wrapped
 }

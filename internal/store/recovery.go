@@ -283,6 +283,14 @@ func taskOperationPreview(ctx context.Context, tx *sql.Tx, id, destination strin
 	if err != nil {
 		return p, err
 	}
+	if err := validateUnsentChildLinks(ctx, tx, id); err != nil {
+		return p, err
+	}
+	if destination != "" && destination != p.Task.ProjectId {
+		if err := validateTaskMoveChildren(ctx, tx, id); err != nil {
+			return p, err
+		}
+	}
 	p.Version, err = targetVersion(ctx, tx, id)
 	if err != nil {
 		return p, err

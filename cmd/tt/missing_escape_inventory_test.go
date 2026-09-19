@@ -614,6 +614,14 @@ var missingEscapeExceptions = []missingEscapeException{
 	},
 	{
 		file:        "doctor.go",
+		scope:       "checkCache",
+		sink:        "fmt.Sprintf(\"%s %s references uncached parent %s\", source, fullReportAtom(ref.TaskID), fullReportAtom(ref.ParentID))",
+		fingerprint: "f344f31b5647202cab23e83f307f0f03991bf8ffd9293cef291bacb96149d330",
+		count:       1,
+		why:         "Both IDs pass through fullReportAtom before the diagnostic is assembled. TestCheckCacheReportsUncachedParentsWithoutWriting checks escaped newlines and terminal controls in the final notes and verifies that inspection leaves the database unchanged.",
+	},
+	{
+		file:        "doctor.go",
 		scope:       "cacheOpenVerdict",
 		sink:        "fmt.Sprintf(\"cache: %s has a sidecar doctor cannot trust\", fullReportAtom(path))",
 		fingerprint: "65cffe441f7c5897c6533747e7bf3f78dca20143101c05497b6002525ffde7f8",
@@ -1244,7 +1252,7 @@ var missingEscapeExceptions = []missingEscapeException{
 		sink:        "fmt.Fprintln(inv.stderr, message)",
 		fingerprint: "b138866ea28f53b0da7c62109465381289c92ceccd8a904ebf0585a762167af1",
 		count:       1,
-		why:         "The two production callers pass only the fixed labels draft kept at and could not remove editor draft:. The pathname is emitted separately through cli.Foreign with a full-value budget. TestEditorRecoveryPathFinalOutputKeepsExactBytes and TestEditorRemovalFailurePathFinalOutputKeepsExactBytes decode that final quoted path without wrapping, clipping or whitespace normalization.",
+		why:         "Production callers, including batch recovery, pass only fixed draft-status labels. The pathname is emitted separately through cli.Foreign with a full-value budget. TestEditorRecoveryPathFinalOutputKeepsExactBytes and TestEditorRemovalFailurePathFinalOutputKeepsExactBytes decode that final quoted path without wrapping, clipping or whitespace normalization.",
 	},
 
 	{

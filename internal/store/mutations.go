@@ -253,6 +253,9 @@ func chainedMove(ctx context.Context, tx *sql.Tx, id string) (bool, error) {
 }
 
 func moveByRecreate(ctx context.Context, tx *sql.Tx, cur model.Task, projectID string) (model.Task, error) {
+	if err := validateTaskMoveChildren(ctx, tx, cur.Id); err != nil {
+		return model.Task{}, err
+	}
 	if cur.ParentId != "" || len(cur.ChildIds) != 0 || cur.ColumnId != "" || len(cur.FocusSummaries) != 0 {
 		return model.Task{}, errors.New("recreate move cannot preserve task relationships; use a verified native move")
 	}
@@ -365,6 +368,9 @@ func (s *Store) DeleteTask(ctx context.Context, id string) error {
 
 func deleteTaskTx(ctx context.Context, tx *sql.Tx, id string, recordUndo bool) (model.Task, error) {
 	if err := nativeMovePending(ctx, tx, id); err != nil {
+		return model.Task{}, err
+	}
+	if err := validateUnsentChildLinks(ctx, tx, id); err != nil {
 		return model.Task{}, err
 	}
 	cur, err := loadTask(ctx, tx, id)

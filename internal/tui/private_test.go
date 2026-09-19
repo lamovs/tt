@@ -238,6 +238,21 @@ func TestPrivateHelpFitsTheDefaultTerminal(t *testing.T) {
 	}
 }
 
+func TestBrowserHelpWrapsAtWordBoundaries(t *testing.T) {
+	m := newModel(context.Background(), nil, Options{})
+	t.Cleanup(m.cancelLoad)
+	m.width = 80
+	text := strings.Join(strings.Fields(strings.Join(m.helpLines(), " ")), " ")
+	for _, sentence := range []string{
+		"Save and close the editor to apply locally; unchanged document returns without saving",
+		"Concurrent changes invalidate confirmations; new search matches never join the target set",
+	} {
+		if !strings.Contains(text, sentence) {
+			t.Fatalf("help split a word in %q", sentence)
+		}
+	}
+}
+
 // privateBoardModel opens the Kanban board for a project with one task
 // per column, which is where boardView paints task text outside paneContent.
 func privateBoardModel(t *testing.T, private bool) browserModel {

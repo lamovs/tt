@@ -173,7 +173,7 @@ func validateTaskExtensions(ctx context.Context, q execer, task model.Task, edit
 // parks it again on every retry, where the server reads the chain closed as
 // well; the next pull then writes the empty parent the server returns over
 // the child and nothing is left of the relationship.
-var ErrChildLinkUnsent = errors.New("a child task is queued to be hung under this task")
+var ErrChildLinkUnsent = errors.New("a child relationship involving this task is still queued")
 
 // ErrChildLinkParked is the same refusal once the queue has parked the entry
 // that carries the relationship. tt sync claims pending entries alone, so a
@@ -214,9 +214,10 @@ type queuedChildLink struct {
 // reads off the decoded metadata. Narrowing here and not over the whole queue
 // keeps a closure from decoding every queued change of every task, which a
 // batch pays for once per task it closes.
-const childLinkCandidateSQL = `SELECT seq, task_id, op, payload, state FROM outbox
-	 WHERE op IN ('` + OpTaskCreate + `','` + OpTaskUpdate + `','` + OpTaskMove + `')
+const childLinkPredicateSQL = `op IN ('` + OpTaskCreate + `','` + OpTaskUpdate + `','` + OpTaskMove + `')
 	   AND json_valid(payload) AND json_extract(payload, '$._tt.fields.extensions') = 1`
+
+const childLinkCandidateSQL = `SELECT seq, task_id, op, payload, state FROM outbox WHERE ` + childLinkPredicateSQL
 
 // scanChildLinks reads the relationships out of the rows a candidate query
 // answered with, dropping the entries that carry an extension edit of some
@@ -243,11 +244,23 @@ func scanChildLinks(rows *sql.Rows) ([]queuedChildLink, error) {
 		if err != nil {
 			return nil, err
 		}
-		if !hangs {
-			continue
-		}
 		link.child, link.parent, link.state = taskID.String, parent, OutboxState(state)
-		out = append(out, link)
+		if hangs {
+			out = append(out, link)
+		}
+		if op == OpTaskUpdate || op == OpTaskMove {
+			_, metadata, err := DecodeTaskEditPayload(payload)
+			if err != nil {
+				return nil, err
+			}
+			if metadata != nil && metadata.ExtensionBaseline != nil && metadata.ExtensionBaseline.ParentId != nil {
+				previous := *metadata.ExtensionBaseline.ParentId
+				if previous != "" && previous != parent {
+					link.parent = previous
+					out = append(out, link)
+				}
+			}
+		}
 	}
 	return out, rows.Err()
 }
@@ -288,24 +301,43 @@ func validateTaskClosure(ctx context.Context, q execer, task model.Task, edit mo
 	if edit.Status == nil || *edit.Status == model.TaskOpen {
 		return nil
 	}
+	return validateUnsentChildLinks(ctx, q, task.Id)
+}
+
+func validateUnsentChildLinks(ctx context.Context, q execer, id string) error {
 	links, err := unsentChildLinks(ctx, q)
 	if err != nil {
-		return fmt.Errorf("read the queued children of %s: %w", task.Id, err)
+		return fmt.Errorf("read the queued children of %s: %w", id, err)
 	}
 	// cleared remembers the ids a walk has already passed without meeting
 	// this task, so the chains of many queued relationships cost one walk
 	// between them and not one walk each.
 	cleared := map[string]bool{}
 	for _, link := range links {
-		hangs, err := chainHoldsAncestor(ctx, q, link.parent, task.Id, cleared)
+		hangs, err := chainHoldsAncestor(ctx, q, link.parent, id, cleared)
 		if err != nil {
-			return fmt.Errorf("read the queued children of %s: %w", task.Id, err)
+			return fmt.Errorf("read the queued children of %s: %w", id, err)
 		}
 		if hangs {
 			return childLinkRefusal(link)
 		}
 	}
 	return nil
+}
+
+func validateTaskMoveChildren(ctx context.Context, q execer, id string) error {
+	if err := validateUnsentChildLinks(ctx, q, id); err != nil {
+		return err
+	}
+	var child string
+	err := q.QueryRowContext(ctx, `SELECT id FROM tasks WHERE parent_id = ? ORDER BY id LIMIT 1`, id).Scan(&child)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return fmt.Errorf("task has a cached child (%s); detach and sync its relationship before moving", child)
 }
 
 // chainHoldsAncestor reports whether target is the parent a relationship

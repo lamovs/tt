@@ -29,7 +29,8 @@ func init() {
 				}},
 				{Title: "Private mode", Items: []string{
 					"--private hides task titles and the details panel from the first frame, for browsing lists on a shared screen.",
-					"Ctrl+K turns it on and off in every context, including forms. List names, counters, dates and priorities stay visible.",
+					"Ctrl+K toggles the mode in every context. Forms and confirmation dialogs keep their contents visible, even while private mode is on.",
+					"Task titles in status notices and the Editor result panel are hidden too. List names, counters, dates and priorities stay visible.",
 					"The mode is off unless --private is given and is never remembered between runs.",
 				}},
 				{Title: "Tasks and forms", Items: []string{

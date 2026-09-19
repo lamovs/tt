@@ -534,3 +534,80 @@ func TestBatchPreviewHoldsTheTitlesItReadsBack(t *testing.T) {
 		}
 	}
 }
+
+func TestCmdBatchInteractiveConfirmationAndDecline(t *testing.T) {
+	for _, answer := range []string{"y\n", "n\n"} {
+		t.Run(strings.TrimSpace(answer), func(t *testing.T) {
+			batchSeed(t)
+			setupMarkdownEditor(t, []byte("# Work\nInteractive task\n"))
+			old := canAsk
+			canAsk = func(*invocation) bool { return true }
+			t.Cleanup(func() { canAsk = old })
+			r, w, err := os.Pipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer r.Close()
+			if _, err = w.WriteString(answer); err != nil {
+				t.Fatal(err)
+			}
+			w.Close()
+			var out, diagnostic bytes.Buffer
+			code := run(context.Background(), []string{"batch"}, r, &out, &diagnostic)
+			if code != exitOK {
+				t.Fatalf("code=%d stderr=%s", code, &diagnostic)
+			}
+			if !strings.Contains(diagnostic.String(), "create this task?") {
+				t.Fatal("confirmation missing")
+			}
+			tasks := cachedTasks(t)
+			want := 0
+			if answer == "y\n" {
+				want = 1
+			}
+			if len(tasks) != want {
+				t.Fatalf("tasks=%d want=%d stderr=%s", len(tasks), want, &diagnostic)
+			}
+			if answer == "n\n" {
+				batchPreviewID(t, diagnostic.String())
+			}
+		})
+	}
+}
+
+func TestCmdBatchBoundsForeignListNamesAtFinalOutput(t *testing.T) {
+	batchSeed(t)
+	const name = "Work\x1b[31m\u200b"
+	seedProjects(t, model.Project{Id: "p1", Name: name, Kind: "TASK"})
+	code, out, diagnostic, _ := batchRun(t, "# Work\nTask\n", "-y")
+	if code != exitError {
+		t.Fatalf("code=%d, output=%s%s", code, out, diagnostic)
+	}
+	if strings.Contains(out+diagnostic, name) || strings.Contains(out+diagnostic, "\x1b") {
+		t.Fatal("unescaped cached name in batch output")
+	}
+	if !strings.Contains(diagnostic, `\x1b`) || !strings.Contains(diagnostic, `\u200b`) {
+		t.Fatalf("escaped name missing: %s", diagnostic)
+	}
+	if tasks := cachedTasks(t); len(tasks) != 0 {
+		t.Fatalf("invalid document created tasks: %+v", tasks)
+	}
+}
+
+func TestCmdBatchEditorFailureKeepsDraft(t *testing.T) {
+	batchSeed(t)
+	setupMarkdownEditor(t, []byte("# Work\nUnsaved task\n"))
+	t.Setenv("TT_MARKDOWN_FAIL", "1")
+	var out, diagnostic bytes.Buffer
+	code := run(context.Background(), []string{"batch", "-y"}, strings.NewReader(""), &out, &diagnostic)
+	if code != exitError || !strings.Contains(diagnostic.String(), "editor failed") {
+		t.Fatalf("code=%d stderr=%s", code, &diagnostic)
+	}
+	draft, err := os.ReadFile(batchDraftPath(t))
+	if err != nil || !strings.Contains(string(draft), "Unsaved task") {
+		t.Fatalf("draft lost: %q %v", draft, err)
+	}
+	if len(cachedTasks(t)) != 0 {
+		t.Fatal("failed editor created tasks")
+	}
+}

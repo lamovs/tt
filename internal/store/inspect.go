@@ -203,6 +203,52 @@ func (s *Store) DanglingItemTasks(ctx context.Context) ([]ItemTaskReference, err
 	return out, nil
 }
 
+type TaskParentReference struct {
+	TaskID   string
+	ParentID string
+	QueueSeq int64
+	Baseline bool
+}
+
+func (s *Store) UncachedTaskParents(ctx context.Context) ([]TaskParentReference, error) {
+	var hasParent int
+	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM pragma_table_info('tasks') WHERE name = 'parent_id'`).Scan(&hasParent); err != nil {
+		return nil, fmt.Errorf("read uncached task parents: %w", err)
+	}
+	cached := `SELECT id, parent_id, 0, 0 FROM tasks WHERE parent_id <> ''`
+	if hasParent == 0 {
+		cached = `SELECT id, '', 0, 0 FROM tasks WHERE 0`
+	}
+	rows, err := s.db.QueryContext(ctx, `WITH refs(task_id, parent_id, seq, baseline) AS (`+cached+`
+		UNION ALL
+		SELECT task_id, json_extract(CASE WHEN json_valid(payload) THEN payload ELSE '{}' END, '$.parent_id'), seq, 0
+		FROM outbox WHERE op IN ('task.create', 'task.update', 'task.move')
+		UNION ALL
+		SELECT task_id, json_extract(CASE WHEN json_valid(payload) THEN payload ELSE '{}' END, '$._tt.extension_baseline.parent_id'), seq, 1
+		FROM outbox WHERE op IN ('task.update', 'task.move')
+	)
+	SELECT coalesce(refs.task_id, ''), refs.parent_id, refs.seq, refs.baseline FROM refs
+	LEFT JOIN tasks parent ON parent.id = refs.parent_id
+	WHERE typeof(refs.parent_id) = 'text' AND refs.parent_id <> '' AND parent.id IS NULL
+	ORDER BY refs.task_id, refs.seq, refs.baseline`)
+	if err != nil {
+		return nil, fmt.Errorf("read uncached task parents: %w", err)
+	}
+	defer rows.Close()
+	var out []TaskParentReference
+	for rows.Next() {
+		var ref TaskParentReference
+		if err := rows.Scan(&ref.TaskID, &ref.ParentID, &ref.QueueSeq, &ref.Baseline); err != nil {
+			return nil, fmt.Errorf("read uncached task parents: %w", err)
+		}
+		out = append(out, ref)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read uncached task parents: %w", err)
+	}
+	return out, nil
+}
+
 func inspectDSN(ctx context.Context, path string) string {
 	wait := busyTimeout
 	if deadline, ok := ctx.Deadline(); ok {

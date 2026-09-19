@@ -775,6 +775,10 @@ func checkCache(ctx context.Context) (checkResult, doctorCache) {
 	if err != nil {
 		return cacheReadFailure(path, "the rows made offline", cacheStoreLead, err), cache
 	}
+	parents, parentReferenceErr := st.UncachedTaskParents(ctx)
+	if parentReferenceErr != nil {
+		return cacheReadFailure(path, "the task-to-parent references", cacheStoreLead, parentReferenceErr), cache
+	}
 
 	age, syncNote, syncFinding := lastSyncAge(ctx, st)
 	summary := fmt.Sprintf("cache: %s (schema v%d, %d task(s), %d list(s), synced %s, %d queued)",
@@ -841,6 +845,24 @@ func checkCache(ctx context.Context) (checkResult, doctorCache) {
 		if rest := len(uncachedProjects) - maxDoctorListed; rest > 0 {
 			notes = append(notes, doctorNested(fmt.Sprintf("and %d more, not listed here", rest))...)
 		}
+	}
+	if len(parents) > 0 {
+		status = statusWarn
+		notes = append(notes, doctorNote(fmt.Sprintf("%d task parent reference(s) point outside this local cache; a partial or stale cache can cause this and it does not prove server corruption", len(parents)))...)
+		for _, ref := range parents[:min(len(parents), maxDoctorListed)] {
+			source := "cached task"
+			if ref.QueueSeq != 0 {
+				source = fmt.Sprintf("queued change %d of task", ref.QueueSeq)
+			}
+			if ref.Baseline {
+				source = fmt.Sprintf("baseline of queued change %d of task", ref.QueueSeq)
+			}
+			notes = append(notes, doctorNested(fmt.Sprintf("%s %s references uncached parent %s", source, fullReportAtom(ref.TaskID), fullReportAtom(ref.ParentID)))...)
+		}
+		if rest := len(parents) - maxDoctorListed; rest > 0 {
+			notes = append(notes, doctorNested(fmt.Sprintf("and %d more, not listed here", rest))...)
+		}
+		notes = append(notes, doctorNote("Review the task and sync queue before changing a link. Doctor reports these references without repairing them.")...)
 	}
 	if len(orphans) > 0 {
 		status = statusWarn

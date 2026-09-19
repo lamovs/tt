@@ -78,6 +78,90 @@ func TestDroppedParentKeepsChildEstimatesSendable(t *testing.T) {
 	}
 }
 
+func TestDroppedParentChildCreateAndReparentReachServer(t *testing.T) {
+	ctx := context.Background()
+	st := testStore(t)
+	seedProject(t, st, model.Project{Id: "p", Name: "P"})
+	if _, err := st.SyncProject(ctx, "p", []store.ServerTask{{Task: model.Task{Id: "other", ProjectId: "p", Title: "Other parent"}}}); err != nil {
+		t.Fatal(err)
+	}
+	parent, err := st.CreateTask(ctx, model.Task{ProjectId: "p", Title: "Discarded parent"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, err := st.CreateTask(ctx, model.Task{ProjectId: "p", Title: "Child", ParentId: parent.Id, EstimatedPomo: 3, Items: []model.Item{{Title: "Item"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.UpdateTask(ctx, child.Id, model.TaskEdit{ParentId: model.Ptr("other")}); err != nil {
+		t.Fatal(err)
+	}
+	claimed, _, err := st.Claim(ctx, 1, time.Minute)
+	if err != nil || len(claimed) != 1 || claimed[0].TaskID != parent.Id {
+		t.Fatalf("claim: %+v %v", claimed, err)
+	}
+	if err := st.MarkFailed(ctx, claimed[0].Seq, claimed[0].LeaseToken, "rejected"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.DropParked(ctx); err != nil {
+		t.Fatal(err)
+	}
+	remote := map[string]any{}
+	creates, links := 0, 0
+	server := serve(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/open/v1/task":
+			creates++
+			if err := json.Unmarshal(readBody(t, r), &remote); err != nil {
+				t.Error(err)
+			}
+			if parent, _ := remote["parentId"].(string); parent != "" {
+				t.Errorf("create names discarded parent: %q", parent)
+			}
+			remote["id"], remote["projectId"], remote["status"] = "server-child", "p", 0
+			items, ok := remote["items"].([]any)
+			if !ok || len(items) != 1 {
+				t.Errorf("checklist lost: %+v", remote)
+				w.WriteHeader(400)
+				return
+			}
+			items[0].(map[string]any)["id"] = "server-item"
+			writeJSON(t, w, remote)
+		case r.Method == http.MethodPost && r.URL.Path == "/open/v1/task/server-child":
+			links++
+			var patch map[string]any
+			if err := json.Unmarshal(readBody(t, r), &patch); err != nil {
+				t.Error(err)
+			}
+			if patch["parentId"] != "other" {
+				t.Errorf("reparent: %+v", patch)
+			}
+			for key, value := range patch {
+				remote[key] = value
+			}
+			w.WriteHeader(http.StatusOK)
+		case r.Method == http.MethodGet && r.URL.Path == "/open/v1/project/p/task/server-child":
+			writeJSON(t, w, remote)
+		case r.Method == http.MethodGet && r.URL.Path == "/open/v1/project/p/task/other":
+			writeJSON(t, w, map[string]any{"id": "other", "projectId": "p", "title": "Other parent", "status": 0})
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+	result, err := testSyncer(t, st, server).Push(ctx)
+	if err != nil || result.ErrorCount() != 0 || result.Pushed != 2 || creates != 1 || links != 1 {
+		t.Fatalf("push: %+v create=%d link=%d %v", result, creates, links, err)
+	}
+	got, err := st.Task(ctx, "server-child")
+	if err != nil || got.ParentId != "other" || got.EstimatedPomo != 3 || len(got.Items) != 1 || got.Items[0].Title != "Item" {
+		t.Fatalf("child: %+v %v", got, err)
+	}
+	if counts := outboxCounts(t, st); counts != (store.OutboxCounts{}) {
+		t.Fatalf("queue: %+v", counts)
+	}
+}
+
 func TestTaskExtensionSyncConflictClearAndReadback(t *testing.T) {
 	for _, conflict := range []bool{false, true} {
 		t.Run(map[bool]string{false: "clear", true: "conflict"}[conflict], func(t *testing.T) {
